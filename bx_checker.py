@@ -82,10 +82,12 @@ def check_for_update():
                     latest = line.split("=")[1].strip().strip('"').strip("'")
                     if latest != __version__:
                         print(f"\n{'!'*50}")
-                        print(f"  ⚠️  업데이트 알림: 현재 v{__version__} → 최신 v{latest}")
+                        print(f"  ⚠️  업데이트 필요: 현재 v{__version__} → 최신 v{latest}")
                         print(f"  아래 링크에서 최신 버전을 받아주세요:")
                         print(f"  https://github.com/vipywk-lab/DH-checker")
                         print(f"{'!'*50}\n")
+                        input("업데이트 후 다시 실행해주세요. 엔터 누르면 종료...")
+                        raise SystemExit("구버전 실행 차단")
                     else:
                         print(f"✅ 최신 버전입니다 (v{__version__})")
                     return
