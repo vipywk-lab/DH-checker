@@ -1,13 +1,11 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.3 (2026-06-25)
-# 변경: 티웨이(TW) 크롤러 구현 (Akamai 수동 우회 + 자동조회)
-#       stealth navigator_webdriver 버그 수정 (True→False)
-#       User-Agent Chrome/124→137 업데이트
-#       --disable-extensions 제거 (봇 신호)
+# 버전: v2.5 (2026-06-25)
+# 변경: 티웨이 조회 전 Chrome 방문 안내 팝업 추가
+#       → Akamai 세션쿠키 로딩으로 신뢰 점수 향상
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.3"
+__version__ = "2.5"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -1014,9 +1012,10 @@ async def main():
     print("✈️  타사 예약 자동 검증 시스템 v2.2")
     print("    (2026-06-25) | 문의: 승무계획팀")
     print(f"{'='*50}")
+    print(f"  v2.4 변경사항: Chrome 프로필 재사용 (launch_persistent_context)")
+    print(f"         → Akamai 세션쿠키 로딩, 신뢰 점수 향상")
     print(f"  v2.3 변경사항: 티웨이항공(TW) 자동조회 구현 (Akamai 수동 우회 지원),")
     print(f"         stealth webdriver 버그 수정, Chrome UA 137 업데이트")
-    print(f"  v2.2 변경사항: 티웨이항공(TW) 추가 (봇 감지로 수동확인 처리)")
     print("  v2.1 변경사항: 에어부산 클라우드플레어 우회,")
     print("         파라타항공 자동조회, 월말 조회 기능,")
     print("         대한항공 국제선 개선, 동명이인/하이픈 처리")
@@ -1049,6 +1048,19 @@ async def main():
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
+    # 티웨이항공 건수 있으면 Chrome 방문 안내 팝업
+    if tw_cnt > 0:
+        messagebox.showinfo(
+            "티웨이항공 조회 전 필수 안내",
+            f"티웨이항공 예약 {tw_cnt}건이 감지되었습니다.\n\n"
+            f"Akamai 보안 우회를 위해 조회 전 아래 작업을 먼저 해주세요:\n\n"
+            f"  1. 크롬(Chrome)을 여세요\n"
+            f"  2. 주소창에 www.twayair.com 을 입력하고 방문하세요\n"
+            f"  3. 페이지가 정상적으로 뜨면 이 창으로 돌아와 확인을 누르세요\n\n"
+            f"※ 이미 최근에 방문한 적 있다면 바로 확인을 눌러도 됩니다."
+        )
+        print("티웨이항공 Chrome 사전 방문 완료 확인됨\n")
+
     # 파라타항공 건수 있으면 이메일 입력 팝업
     we_email = ""
     if we_cnt > 0:
@@ -1080,36 +1092,74 @@ async def main():
     else:
         print("⚠️  Chrome 미발견 → Playwright Chromium으로 실행 (에어부산 캡챠 발생 가능)")
 
-    # Chrome 쿠키 파일 임시 복사 (원본 잠금 회피)
     import shutil, tempfile
+
+    LAUNCH_ARGS = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--window-size=1280,800",
+    ]
+    CONTEXT_OPTS = dict(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+        locale="ko-KR",
+        timezone_id="Asia/Seoul",
+        viewport={"width": 1280, "height": 800},
+        java_script_enabled=True,
+    )
+
+    # ── Chrome 프로필 복사 (쿠키·히스토리 → Akamai/CF 신뢰 점수 향상) ──
+    tmp_profile_dir = None
+    if use_profile:
+        try:
+            tmp_profile_dir = tempfile.mkdtemp(prefix="bxchk_chrome_")
+            src = os.path.join(chrome_profile, "Default")
+            dst = os.path.join(tmp_profile_dir, "Default")
+            # 핵심 파일만 선택 복사 (Cookies, Preferences, Local State)
+            os.makedirs(dst, exist_ok=True)
+            for fname in ("Cookies", "Preferences", "Secure Preferences"):
+                s = os.path.join(src, fname)
+                if os.path.exists(s):
+                    try:
+                        shutil.copy2(s, dst)
+                    except Exception:
+                        pass  # 잠금 파일 스킵
+            ls_src = os.path.join(chrome_profile, "Local State")
+            if os.path.exists(ls_src):
+                shutil.copy2(ls_src, tmp_profile_dir)
+            print(f"Chrome 프로필 로딩 완료 → Akamai 세션 쿠키 재사용")
+        except Exception as e:
+            print(f"⚠️  Chrome 프로필 복사 실패 ({e}) → 빈 프로필로 실행")
+            if tmp_profile_dir:
+                shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+            tmp_profile_dir = None
+
     async with async_playwright() as p:
-        launch_kwargs = dict(
-            headless=HEADLESS,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--window-size=1280,800",
-            ]
-        )
-        if chrome_exe:
-            launch_kwargs["executable_path"] = chrome_exe
+        # ── launch_persistent_context: 프로필 있으면 쿠키 재사용, 없으면 일반 론칭 ──
+        if tmp_profile_dir and chrome_exe:
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir=tmp_profile_dir,
+                executable_path=chrome_exe,
+                headless=HEADLESS,
+                args=LAUNCH_ARGS,
+                **CONTEXT_OPTS,
+            )
+            browser = None
+            print("모드: launch_persistent_context (Chrome 프로필 재사용)")
+        else:
+            launch_kwargs = dict(headless=HEADLESS, args=LAUNCH_ARGS)
+            if chrome_exe:
+                launch_kwargs["executable_path"] = chrome_exe
+            browser  = await p.chromium.launch(**launch_kwargs)
+            context  = await browser.new_context(**CONTEXT_OPTS)
+            print("모드: 일반 론칭 (빈 프로필)")
 
-        browser = await p.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/137.0.0.0 Safari/537.36"
-            ),
-            locale="ko-KR",
-            timezone_id="Asia/Seoul",
-            viewport={"width": 1280, "height": 800},
-            java_script_enabled=True,
-        )
-
-        # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
+        # ── playwright-stealth 적용 ──
         if STEALTH_AVAILABLE:
             stealth = Stealth(
                 navigator_languages_override=("ko-KR", "ko"),
@@ -1117,7 +1167,7 @@ async def main():
                 navigator_webdriver=False,
                 chrome_runtime=True,
             )
-            print("playwright-stealth 적용 완료 (클라우드플레어 우회 시도)")
+            print("playwright-stealth 적용 완료")
         else:
             stealth = None
             await context.add_init_script("""
@@ -1129,8 +1179,6 @@ async def main():
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
         page = await context.new_page()
-
-        # stealth를 page에 적용
         if stealth:
             await stealth.apply_stealth_async(page)
 
@@ -1150,18 +1198,23 @@ async def main():
                 result, detail = await run_check(page, target, we_email)
                 target["result"] = result
                 target["detail"] = detail
-                # 성공한 결과만 캐시에 저장
                 if "확인완료" in result:
                     pnr_cache[pnr] = (result, detail)
                 print(f"{result}  {detail}")
                 if i < total:
-                    # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
                     if target["airline"] == "에어부산":
                         await asyncio.sleep(random.uniform(5.0, 10.0))
                     else:
                         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        await browser.close()
+        # ── 정리 ──
+        if browser:
+            await browser.close()
+        else:
+            await context.close()
+
+    if tmp_profile_dir:
+        shutil.rmtree(tmp_profile_dir, ignore_errors=True)
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
