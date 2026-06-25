@@ -192,7 +192,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -790,15 +790,6 @@ async def check_tw(page, target):
         name_first = target["first"]
         name_display = f"{kor_name} (한글)"
 
-    # URL 파라미터로 PNR+이름 전달 시도 (TW가 읽어주면 자동입력)
-    params = urllib.parse.urlencode({
-        "pnrNumber": pnr,
-        "lastName": name_last,
-        "firstName": name_first,
-    })
-    url = f"https://www.twayair.com/app/reservation/searchMemberBooking?{params}"
-    webbrowser.open(url)
-
     return "⚠️ 수동확인필요", f"티웨이-수동조회: {name_display} | PNR: {pnr}"
 
 
@@ -824,7 +815,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어", "티웨이항공")
+        airline in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -891,6 +882,15 @@ def _show_tw_popup(tw_manual, root):
             name_label = f"{name_last} / {name_first}  (한글)"
 
         pnr = t["pnr"]
+
+        # 팝업 뜨기 직전에 Chrome 탭 열기
+        import urllib.parse
+        params = urllib.parse.urlencode({
+            "pnrNumber": pnr,
+            "lastName": name_last,
+            "firstName": name_first,
+        })
+        webbrowser.open(f"https://www.twayair.com/app/reservation/searchMemberBooking?{params}")
 
         # ── 팝업 윈도우 ──
         win = tk.Toplevel(root)
