@@ -172,7 +172,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -212,7 +212,7 @@ def save_results(path, sheet, targets):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
         kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         key = (pnr, airline, kor_name)
         if key in result_map:
@@ -892,7 +892,7 @@ async def run_check(page, target, we_email=""):
         result, detail = await check_lj(page, target)
     elif airline == "파라타항공":
         result, detail = await check_we(page, target, we_email)
-    elif airline == "티웨이":
+    elif airline == "티웨이항공":
         result, detail = await check_tw(page, target)
     else:
         return "⬜ 미지원", "지원 항공사 아님"
@@ -901,7 +901,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어", "티웨이")
+        airline in ("에어부산", "대한항공", "진에어", "티웨이항공")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -921,7 +921,7 @@ async def run_check(page, target, we_email=""):
             r2, d2 = await check_ke(page, tmp)
         elif airline == "진에어":
             r2, d2 = await check_lj(page, tmp)
-        elif airline == "티웨이":
+        elif airline == "티웨이항공":
             r2, d2 = await check_tw(page, tmp)
         if "확인완료" in r2 or "불일치" in r2:
             result = r2
@@ -938,7 +938,7 @@ async def run_check(page, target, we_email=""):
             result, detail = await check_lj(page, target)
         elif airline == "파라타항공":
             result, detail = await check_we(page, target, we_email)
-        elif airline == "티웨이":
+        elif airline == "티웨이항공":
             result, detail = await check_tw(page, target)
         if "타임아웃" not in result:
             detail = "[재시도 성공] " + detail
@@ -969,7 +969,7 @@ async def main():
     total   = len(targets)
 
     if total == 0:
-        print(f"오늘부터 {CHECK_DAYS}일 이내 검증 대상이 없습니다.")
+        print(f"검증 대상이 없습니다. ({mode_label})")
         input("엔터 누르면 종료...")
         return
 
@@ -977,7 +977,7 @@ async def main():
     ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
     lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
     we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
-    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이")
+    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이항공")
 
     print(f"검증 대상: {total}건 ({mode_label})")
     print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
