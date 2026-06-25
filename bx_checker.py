@@ -1,11 +1,12 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.5 (2026-06-25)
-# 변경: 티웨이 조회 전 Chrome 방문 안내 팝업 추가
+# 버전: v2.6 (2026-06-25)
+# 변경: patchright 교체 (CDP 탐지 우회)
+#       Preferences 크래시 플래그 초기화 (복원 다이얼로그 방지)
 #       → Akamai 세션쿠키 로딩으로 신뢰 점수 향상
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.5"
+__version__ = "2.6"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 import openpyxl
 from tkinter import filedialog, messagebox
 import tkinter as tk
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+from patchright.async_api import async_playwright, TimeoutError as PWTimeout
 try:
     from playwright_stealth import Stealth
     STEALTH_AVAILABLE = True
@@ -1100,6 +1101,7 @@ async def main():
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--window-size=1280,800",
+        "--no-restore-pages",
     ]
     CONTEXT_OPTS = dict(
         user_agent=(
@@ -1129,6 +1131,20 @@ async def main():
                         shutil.copy2(s, dst)
                     except Exception:
                         pass  # 잠금 파일 스킵
+            # Preferences 크래시 플래그 초기화 (복원 다이얼로그 방지)
+            import json
+            pref_dst = os.path.join(dst, "Preferences")
+            if os.path.exists(pref_dst):
+                try:
+                    with open(pref_dst, "r", encoding="utf-8") as f:
+                        prefs = json.load(f)
+                    prefs.setdefault("profile", {})["exit_type"] = "Normal"
+                    prefs["profile"]["exited_cleanly"] = True
+                    prefs.pop("sessions", None)
+                    with open(pref_dst, "w", encoding="utf-8") as f:
+                        json.dump(prefs, f)
+                except Exception:
+                    pass  # 파싱 실패 시 무시
             ls_src = os.path.join(chrome_profile, "Local State")
             if os.path.exists(ls_src):
                 shutil.copy2(ls_src, tmp_profile_dir)
