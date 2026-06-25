@@ -1,11 +1,10 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.8 (2026-06-25)
-# 변경: TW 건별 Chrome 탭 오픈 (URL 파라미터 자동입력 시도)
-#       국내선=한글/국제선=영문 이름 구분 출력
+# 버전: v2.9 (2026-06-25)
+# 변경: TW 수동확인 목록 클립보드 자동 복사 (PNR⇥성⇥이름)
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.8"
+__version__ = "2.9"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -1103,19 +1102,40 @@ async def main():
     if tw_manual:
         print(f"\n{'─'*52}")
         print(f"  📋 티웨이항공 수동확인 목록 ({len(tw_manual)}건)")
-        print(f"  → 각 건마다 Chrome 탭이 열립니다 (URL 파라미터 자동입력 시도)")
+        print(f"  → 각 건마다 Chrome 탭이 열립니다")
+        print(f"  → 클립보드: 탭(Tab)키로 PNR→성→이름 순서로 붙여넣기 가능")
         print(f"{'─'*52}")
-        for t in tw_manual:
+
+        clip_lines = []
+        for idx, t in enumerate(tw_manual, 1):
             intl = is_international(t["dep"], t["arr"])
             eng  = t.get("eng_name", "")
             if intl and eng:
-                parts = eng.split("/")
-                name_str = f"{parts[0].strip()}/{parts[1].strip()} (영문, 국제선)"
+                parts      = eng.split("/")
+                name_last  = parts[0].strip()
+                name_first = parts[1].strip() if len(parts) >= 2 else ""
+                name_str   = f"{name_last}/{name_first} (영문, 국제선)"
             else:
-                name_str = f"{t['last']} / {t['first']} (한글, 국내선)"
-            print(f"  {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']} | {t['dep']}→{t['arr']}")
-            print(f"         입력이름: {name_str}")
+                name_last  = t["last"]
+                name_first = t["first"]
+                name_str   = f"{name_last} / {name_first} (한글, 국내선)"
+            print(f"  [{idx}] {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']} | {t['dep']}→{t['arr']}")
+            print(f"       입력이름: {name_str}")
+            # 탭 구분으로 클립보드에 누적 (PNR→성→이름)
+            clip_lines.append(f"{t['pnr']}\t{name_last}\t{name_first}")
+
         print(f"{'─'*52}")
+
+        # 클립보드에 복사 (탭 구분, 여러 건은 줄바꿈으로 구분)
+        try:
+            clip_text = "\n".join(clip_lines)
+            root.clipboard_clear()
+            root.clipboard_append(clip_text)
+            root.update()
+            print(f"  📋 클립보드 복사 완료 — 첫 번째 탭에서 Ctrl+V 하세요")
+            print(f"     (여러 건: 각 줄이 PNR⇥성⇥이름 순서)")
+        except Exception:
+            pass
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
 
