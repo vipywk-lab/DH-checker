@@ -83,7 +83,12 @@ def check_for_update():
             for line in resp.read().decode("utf-8").splitlines():
                 if line.startswith("__version__"):
                     latest = line.split("=")[1].strip().strip('"').strip("'")
-                    if latest != __version__:
+                    def _ver(v):
+                        try:
+                            return tuple(int(x) for x in v.split("."))
+                        except Exception:
+                            return (0,)
+                    if _ver(latest) > _ver(__version__):
                         print(f"\n{'!'*50}")
                         print(f"  ⚠️  업데이트 필요: 현재 v{__version__} → 최신 v{latest}")
                         print(f"  아래 링크에서 최신 버전을 받아주세요:")
