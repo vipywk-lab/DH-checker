@@ -1027,16 +1027,10 @@ async def main():
     ]
     chrome_exe = next((p for p in CHROME_PATHS if os.path.exists(p)), None)
 
-    # Chrome 프로필 경로 (쿠키·히스토리 재사용 → 클라우드플레어 신뢰 점수 향상)
-    chrome_profile = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data")
-    use_profile = chrome_exe and os.path.exists(chrome_profile)
-
     if chrome_exe:
         print(f"시스템 Chrome 사용: {chrome_exe}")
     else:
         print("⚠️  Chrome 미발견 → Playwright Chromium으로 실행 (에어부산 캡챠 발생 가능)")
-
-    import shutil, tempfile
 
     LAUNCH_ARGS = [
         "--disable-blink-features=AutomationControlled",
@@ -1044,7 +1038,6 @@ async def main():
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--window-size=1280,800",
-        "--no-restore-pages",
     ]
     CONTEXT_OPTS = dict(
         user_agent=(
@@ -1058,65 +1051,12 @@ async def main():
         java_script_enabled=True,
     )
 
-    # ── Chrome 프로필 복사 (쿠키·히스토리 → Akamai/CF 신뢰 점수 향상) ──
-    tmp_profile_dir = None
-    if use_profile:
-        try:
-            tmp_profile_dir = tempfile.mkdtemp(prefix="bxchk_chrome_")
-            src = os.path.join(chrome_profile, "Default")
-            dst = os.path.join(tmp_profile_dir, "Default")
-            # 핵심 파일만 선택 복사 (Cookies, Preferences, Local State)
-            os.makedirs(dst, exist_ok=True)
-            for fname in ("Cookies", "Preferences", "Secure Preferences"):
-                s = os.path.join(src, fname)
-                if os.path.exists(s):
-                    try:
-                        shutil.copy2(s, dst)
-                    except Exception:
-                        pass  # 잠금 파일 스킵
-            # Preferences 크래시 플래그 초기화 (복원 다이얼로그 방지)
-            import json
-            pref_dst = os.path.join(dst, "Preferences")
-            if os.path.exists(pref_dst):
-                try:
-                    with open(pref_dst, "r", encoding="utf-8") as f:
-                        prefs = json.load(f)
-                    prefs.setdefault("profile", {})["exit_type"] = "Normal"
-                    prefs["profile"]["exited_cleanly"] = True
-                    prefs.pop("sessions", None)
-                    with open(pref_dst, "w", encoding="utf-8") as f:
-                        json.dump(prefs, f)
-                except Exception:
-                    pass  # 파싱 실패 시 무시
-            ls_src = os.path.join(chrome_profile, "Local State")
-            if os.path.exists(ls_src):
-                shutil.copy2(ls_src, tmp_profile_dir)
-            print(f"Chrome 프로필 로딩 완료 → Akamai 세션 쿠키 재사용")
-        except Exception as e:
-            print(f"⚠️  Chrome 프로필 복사 실패 ({e}) → 빈 프로필로 실행")
-            if tmp_profile_dir:
-                shutil.rmtree(tmp_profile_dir, ignore_errors=True)
-            tmp_profile_dir = None
-
     async with async_playwright() as p:
-        # ── launch_persistent_context: 프로필 있으면 쿠키 재사용, 없으면 일반 론칭 ──
-        if tmp_profile_dir and chrome_exe:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=tmp_profile_dir,
-                executable_path=chrome_exe,
-                headless=HEADLESS,
-                args=LAUNCH_ARGS,
-                **CONTEXT_OPTS,
-            )
-            browser = None
-            print("모드: launch_persistent_context (Chrome 프로필 재사용)")
-        else:
-            launch_kwargs = dict(headless=HEADLESS, args=LAUNCH_ARGS)
-            if chrome_exe:
-                launch_kwargs["executable_path"] = chrome_exe
-            browser  = await p.chromium.launch(**launch_kwargs)
-            context  = await browser.new_context(**CONTEXT_OPTS)
-            print("모드: 일반 론칭 (빈 프로필)")
+        launch_kwargs = dict(headless=HEADLESS, args=LAUNCH_ARGS)
+        if chrome_exe:
+            launch_kwargs["executable_path"] = chrome_exe
+        browser = await p.chromium.launch(**launch_kwargs)
+        context = await browser.new_context(**CONTEXT_OPTS)
 
         # ── playwright-stealth 적용 ──
         if STEALTH_AVAILABLE:
@@ -1166,14 +1106,7 @@ async def main():
                     else:
                         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        # ── 정리 ──
-        if browser:
-            await browser.close()
-        else:
-            await context.close()
-
-    if tmp_profile_dir:
-        shutil.rmtree(tmp_profile_dir, ignore_errors=True)
+        await browser.close()
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
