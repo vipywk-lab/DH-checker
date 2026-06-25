@@ -1,12 +1,10 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.1 (2026-06-23)
-# 변경: playwright-stealth 적용, 파라타항공 자동조회 추가,
-#       대한항공 국제선 영문이름 분기, 동명이인 구분자 제거,
-#       하이픈 자동 제거, 월말 조회 기능, 저장 오류 처리 개선
+# 버전: v2.2 (2026-06-25)
+# 변경: 티웨이(TW) 크롤러 추가 (국내선/국제선 지원, 영문 재시도 포함)
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.1"
+__version__ = "2.2"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -65,6 +63,7 @@ BX_URL     = "https://www.airbusan.com/web/individual/reserve/index"
 KE_URL     = "https://www.koreanair.com/reservation/search"
 LJ_URL     = "https://www.jinair.com/booking/index"
 WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
+TW_URL     = "https://www.twayair.com/app/reservation/searchMemberBooking#none"
 HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
@@ -173,7 +172,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -213,7 +212,7 @@ def save_results(path, sheet, targets):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
         kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이"):
             continue
         key = (pnr, airline, kor_name)
         if key in result_map:
@@ -750,6 +749,136 @@ async def check_we(page, target, we_email):
         page.remove_listener("dialog", _on_dialog)
 
 
+async def check_tw(page, target):
+    pnr      = target["pnr"]
+    eng_name = target.get("eng_name", "")
+    dep      = target["dep"]
+    arr      = target["arr"]
+
+    dep_date = parse_dep_date(target["dep_time"])
+    if not dep_date:
+        return "💥 오류", "출발일 파싱 실패"
+
+    # 국내선=한글, 국제선=영문
+    intl = is_international(dep, arr)
+    if intl and eng_name:
+        parts = eng_name.split("/")
+        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
+        first = parts[1].strip() if len(parts) >= 2 else target["first"]
+    else:
+        last  = target["last"]
+        first = target["first"]
+
+    try:
+        await page.goto(TW_URL, wait_until="domcontentloaded", timeout=20000)
+        await page.wait_for_timeout(2000)
+
+        # PNR 입력
+        await page.fill("input[name='pnrNumber']", pnr)
+        await page.wait_for_timeout(300)
+
+        # 출발일 달력 팝업
+        await page.click("a.btn_date", timeout=5000)
+        await page.wait_for_timeout(1500)
+
+        # 목표 월까지 이동
+        for _ in range(12):
+            cal_text = await page.inner_text("body")
+            cal_match = re.search(r'(\d{4})년\s*(\d{1,2})월', cal_text)
+            if cal_match:
+                cal_year  = int(cal_match.group(1))
+                cal_month = int(cal_match.group(2))
+                if cal_year == dep_date.year and cal_month == dep_date.month:
+                    break
+                if (cal_year * 12 + cal_month) < (dep_date.year * 12 + dep_date.month):
+                    await page.click("a.btn_cal_next", timeout=3000)
+                else:
+                    await page.click("a.btn_cal_prev", timeout=3000)
+                await page.wait_for_timeout(500)
+
+        # 날짜 클릭
+        dep_day = str(dep_date.day)
+        await page.evaluate(f"""
+            (function() {{
+                var spans = document.querySelectorAll('span');
+                for (var s of spans) {{
+                    if (s.textContent.trim() === '{dep_day}') {{
+                        var a = s.closest('a') || s.parentElement;
+                        if (a) {{ a.click(); return; }}
+                    }}
+                }}
+            }})();
+        """)
+        await page.wait_for_timeout(500)
+
+        # 성/이름 입력
+        await page.fill("#lastName",  last)
+        await page.wait_for_timeout(300)
+        await page.fill("#firstName", first)
+        await page.wait_for_timeout(300)
+
+        # 확인 버튼 클릭
+        await page.click("button.btn_large.red", timeout=5000)
+
+        # 결과 대기
+        try:
+            await page.wait_for_selector("text=여정 정보", timeout=15000)
+        except:
+            pass
+        await page.wait_for_timeout(2000)
+
+        html_content = await page.inner_text("body")
+
+        if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않", "일치하는 예약"]):
+            return "❌ PNR오류", "예약 확인 불가"
+
+        if "여정 정보" not in html_content:
+            return "💥 오류", "결과 페이지 로드 실패"
+
+        # 편명 파싱 (TW033 형태)
+        flt_match = re.search(r'TW\s*\d{3,4}', html_content)
+        flt_found = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
+
+        # 날짜 파싱 (2026-06-30 형태)
+        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', html_content)
+        date_found = date_match.group() if date_match else "날짜미확인"
+
+        # 구간 파싱
+        airports = re.findall(
+            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+            r'|NRT|HND|KIX|NGO|FUK|CTS|OKA'
+            r'|BKK|CNX|HKT|SGN|HAN|DAD|CXR|MNL|CEB|KLO'
+            r'|TPE|HKG|MFM|SIN|DPS|GUM|PQC|RGN)(?![A-Z0-9])',
+            html_content
+        )
+        route_found = f"{airports[0]}→{airports[1]}" if len(airports) >= 2 else "구간미확인"
+
+        detail = f"{flt_found} | {date_found} | {route_found}"
+
+        # 날짜 불일치 검사
+        mismatch = []
+        if dep_date and date_found != "날짜미확인":
+            try:
+                site_date = datetime.strptime(date_found, "%Y-%m-%d")
+                if dep_date.date() != site_date.date():
+                    mismatch.append(
+                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
+                    )
+            except:
+                pass
+
+        if mismatch:
+            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        return "✅ 확인완료", detail
+
+    except PWTimeout:
+        return "⏱️ 타임아웃", "재시도 필요"
+    except Exception:
+        logging.error(f"티웨이 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
+        return "💥 오류", "시스템 로그 확인 필요"
+
+
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
     airline  = target["airline"]
@@ -763,6 +892,8 @@ async def run_check(page, target, we_email=""):
         result, detail = await check_lj(page, target)
     elif airline == "파라타항공":
         result, detail = await check_we(page, target, we_email)
+    elif airline == "티웨이":
+        result, detail = await check_tw(page, target)
     else:
         return "⬜ 미지원", "지원 항공사 아님"
 
@@ -770,7 +901,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어")
+        airline in ("에어부산", "대한항공", "진에어", "티웨이")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -790,6 +921,8 @@ async def run_check(page, target, we_email=""):
             r2, d2 = await check_ke(page, tmp)
         elif airline == "진에어":
             r2, d2 = await check_lj(page, tmp)
+        elif airline == "티웨이":
+            r2, d2 = await check_tw(page, tmp)
         if "확인완료" in r2 or "불일치" in r2:
             result = r2
             detail = "[영문재시도] " + d2
@@ -805,6 +938,8 @@ async def run_check(page, target, we_email=""):
             result, detail = await check_lj(page, target)
         elif airline == "파라타항공":
             result, detail = await check_we(page, target, we_email)
+        elif airline == "티웨이":
+            result, detail = await check_tw(page, target)
         if "타임아웃" not in result:
             detail = "[재시도 성공] " + detail
 
@@ -813,8 +948,13 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v2.1")
-    print("    (2026-06-23) | 문의: 승무계획팀")
+    print("✈️  타사 예약 자동 검증 시스템 v2.2")
+    print("    (2026-06-25) | 문의: 승무계획팀")
+    print(f"{'='*50}")
+    print("  v2.2 변경사항: 티웨이(TW) 크롤러 추가")
+    print("  v2.1 변경사항: 에어부산 클라우드플레어 우회,")
+    print("         파라타항공 자동조회, 월말 조회 기능,")
+    print("         대한항공 국제선 개선, 동명이인/하이픈 처리")
     print(f"{'='*50}\n")
 
     check_for_update()
@@ -837,9 +977,10 @@ async def main():
     ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
     lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
     we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
+    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이")
 
     print(f"검증 대상: {total}건 ({mode_label})")
-    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건")
+    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
