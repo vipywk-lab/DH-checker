@@ -30,14 +30,13 @@ from datetime import datetime, timedelta
 import openpyxl
 from tkinter import filedialog, messagebox
 import tkinter as tk
-from patchright.async_api import async_playwright, TimeoutError as PWTimeout
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 try:
     from playwright_stealth import Stealth
     STEALTH_AVAILABLE = True
 except ImportError:
     STEALTH_AVAILABLE = False
 
-STEALTH_AVAILABLE = False
 
 # ==========================================
 # Playwright Chromium 최초 1회 자동 설치
@@ -192,7 +191,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -314,7 +313,9 @@ async def check_bx(page, target):
 
         # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
         CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
-                       "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
+                       "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare",
+                       "Just a moment", "Enable JavaScript", "cf-browser-verification",
+                       "Verify you are human", "Security check"]
         body_check = await page.inner_text("body")
         if any(kw in body_check for kw in CF_KEYWORDS):
             print(f"\n{'='*50}")
@@ -410,6 +411,9 @@ async def check_bx(page, target):
 
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        if flt_found == "편명미확인" and date_found == "날짜미확인":
+            return "💥 오류", "파싱 실패 (CF 차단 또는 페이지 미로딩)"
 
         return "✅ 확인완료", detail
 
@@ -1037,13 +1041,13 @@ async def main():
         "--disable-infobars",
         "--no-sandbox",
         "--disable-dev-shm-usage",
-        "--window-size=1280,800",
+        "--disable-extensions",
     ]
     CONTEXT_OPTS = dict(
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/137.0.0.0 Safari/537.36"
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
         locale="ko-KR",
         timezone_id="Asia/Seoul",
@@ -1063,7 +1067,7 @@ async def main():
             stealth = Stealth(
                 navigator_languages_override=("ko-KR", "ko"),
                 navigator_platform_override="Win32",
-                navigator_webdriver=False,
+                navigator_webdriver=True,
                 chrome_runtime=True,
             )
             print("playwright-stealth 적용 완료")
