@@ -1,16 +1,15 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.6 (2026-06-25)
-# 변경: patchright 교체 (CDP 탐지 우회)
-#       Preferences 크래시 플래그 초기화 (복원 다이얼로그 방지)
-#       → Akamai 세션쿠키 로딩으로 신뢰 점수 향상
+# 버전: v2.7 (2026-06-25)
+# 변경: TW 자동조회 포기 → 실제 Chrome 자동 오픈 + 수동확인 목록 출력
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.6"
+__version__ = "2.7"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
 import random
+import webbrowser
 import re
 import logging
 import os
@@ -25,6 +24,8 @@ try:
     STEALTH_AVAILABLE = True
 except ImportError:
     STEALTH_AVAILABLE = False
+
+STEALTH_AVAILABLE = False
 
 # ==========================================
 # Playwright Chromium 최초 1회 자동 설치
@@ -70,6 +71,7 @@ HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
 
+_TW_BROWSER_OPENED = False  # TW 조회 페이지 최초 1회만 열기
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
 
 
@@ -174,7 +176,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -752,193 +754,18 @@ async def check_we(page, target, we_email):
 
 
 async def check_tw(page, target):
+    """TW는 Akamai Premium으로 자동조회 불가 → 실제 Chrome 열어서 수동 안내"""
+    global _TW_BROWSER_OPENED
     pnr      = target["pnr"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
+    last     = target["last"]
+    first    = target["first"]
+    kor_name = target["kor_name"]
 
-    intl = is_international(dep, arr)
-    if intl and eng_name:
-        parts = eng_name.split("/")
-        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        first = parts[1].strip() if len(parts) >= 2 else target["first"]
-    else:
-        last  = target["last"]
-        first = target["first"]
+    if not _TW_BROWSER_OPENED:
+        webbrowser.open(TW_URL)
+        _TW_BROWSER_OPENED = True
 
-    dep_date = parse_dep_date(target["dep_time"])
-
-    AKAMAI_KEYWORDS = ["Access Denied", "You don't have permission", "edgesuite.net", "Reference #"]
-
-    async def _akamai_check(label):
-        """Akamai 차단 감지 → 수동 해제 요청. 차단 시 True 반환."""
-        body = await page.inner_text("body")
-        if not any(kw in body for kw in AKAMAI_KEYWORDS):
-            return False
-        print(f"\n{'='*50}")
-        print(f"  ⚠️  [티웨이] Akamai 차단 감지 ({label})")
-        print(f"  → 열린 브라우저에서 정상 페이지가 뜰 때까지 기다리거나,")
-        print(f"     새로고침 후 엔터를 눌러주세요.")
-        print(f"{'='*50}")
-        await asyncio.get_event_loop().run_in_executor(None, input, "  [확인 후 엔터] ")
-        body2 = await page.inner_text("body")
-        return any(kw in body2 for kw in AKAMAI_KEYWORDS)
-
-    try:
-        # ① TW 홈페이지 먼저 방문 → Akamai _abck 쿠키 생성
-        await page.goto("https://www.twayair.com", wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(random.uniform(2000, 3500))
-
-        if await _akamai_check("홈페이지"):
-            return "⚠️ 수동확인필요", "티웨이-Akamai 차단 미해제 (홈페이지)"
-
-        # ② 예약조회 페이지 이동
-        await page.goto(TW_URL, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(random.uniform(1500, 2500))
-
-        if await _akamai_check("예약조회 페이지"):
-            return "⚠️ 수동확인필요", "티웨이-Akamai 차단 미해제 (예약조회)"
-
-        # ③ PNR 입력 (selector 우선순위 순 시도)
-        pnr_selectors = [
-            "input[name*='pnr']", "input[name*='PNR']",
-            "input[placeholder*='예약번호']", "input[placeholder*='6자리']",
-            "input[id*='pnr']", "input[id*='Pnr']",
-        ]
-        filled_pnr = False
-        for sel in pnr_selectors:
-            try:
-                await page.locator(sel).first.fill(pnr, timeout=2000)
-                filled_pnr = True
-                break
-            except:
-                continue
-        if not filled_pnr:
-            return "💥 오류", "티웨이-PNR 입력란 미발견 (셀렉터 확인 필요)"
-
-        await page.wait_for_timeout(random.uniform(300, 600))
-
-        # ④ 성(last) 입력
-        last_selectors = [
-            "input[name*='lastName']", "input[name*='last_name']", "input[name*='성']",
-            "input[placeholder*='성']", "input[placeholder*='Last']",
-            "input[id*='lastName']", "input[id*='last']",
-        ]
-        filled_last = False
-        for sel in last_selectors:
-            try:
-                await page.locator(sel).first.fill(last, timeout=2000)
-                filled_last = True
-                break
-            except:
-                continue
-        if not filled_last:
-            return "💥 오류", "티웨이-성 입력란 미발견 (셀렉터 확인 필요)"
-
-        await page.wait_for_timeout(random.uniform(300, 500))
-
-        # ⑤ 이름(first) 입력
-        first_selectors = [
-            "input[name*='firstName']", "input[name*='first_name']", "input[name*='이름']",
-            "input[placeholder*='이름']", "input[placeholder*='First']",
-            "input[id*='firstName']", "input[id*='first']",
-        ]
-        filled_first = False
-        for sel in first_selectors:
-            try:
-                await page.locator(sel).first.fill(first, timeout=2000)
-                filled_first = True
-                break
-            except:
-                continue
-        if not filled_first:
-            return "💥 오류", "티웨이-이름 입력란 미발견 (셀렉터 확인 필요)"
-
-        await page.wait_for_timeout(random.uniform(400, 700))
-
-        # ⑥ 조회 버튼 클릭
-        submit_selectors = [
-            "button[type='submit']",
-            "button:has-text('조회')", "button:has-text('확인')", "button:has-text('검색')",
-            "a:has-text('조회')",
-            "input[type='submit']",
-        ]
-        clicked = False
-        for sel in submit_selectors:
-            try:
-                await page.click(sel, timeout=3000)
-                clicked = True
-                break
-            except:
-                continue
-        if not clicked:
-            return "💥 오류", "티웨이-조회 버튼 미발견 (셀렉터 확인 필요)"
-
-        # ⑦ 결과 대기
-        try:
-            await page.wait_for_selector(
-                "text=TW, text=예약, text=항공, text=출발",
-                timeout=15000
-            )
-        except:
-            pass
-        await page.wait_for_timeout(2000)
-
-        # ⑧ Akamai 재감지 (submit 후 차단 여부)
-        if await _akamai_check("조회 후"):
-            return "⚠️ 수동확인필요", "티웨이-Akamai 차단 미해제 (조회 후)"
-
-        html_content = await page.inner_text("body")
-
-        # ⑨ 실패 판정
-        if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않", "일치하지 않"]):
-            return "❌ 예약없음", "조회결과 없음"
-        if any(kw in html_content for kw in ["예약번호가 올바르지", "유효하지 않", "잘못된 예약"]):
-            return "❌ PNR오류", "예약번호 오류"
-
-        # ⑩ 결과 파싱
-        flt_match  = re.search(r'TW\s*\d{3,4}', html_content)
-        flt_found  = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
-
-        date_match = re.search(r'(\d{4})[.\-](\d{2})[.\-](\d{2})', html_content)
-        date_found = (
-            f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
-            if date_match else "날짜미확인"
-        )
-
-        airports = re.findall(
-            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
-            r'|NRT|HND|KIX|FUK|CTS|NGO|OKA'
-            r'|DAD|SGN|HAN|CXR|PQC'
-            r'|TPE|HKG|MFM|DPS|BKK|HKT|SIN|CEB|MNL)(?![A-Z0-9])',
-            html_content
-        )
-        route_found = f"{airports[0]}→{airports[1]}" if len(airports) >= 2 else "구간미확인"
-
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        # ⑪ 날짜 불일치 검사
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        return "✅ 확인완료", detail
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        logging.error(f"티웨이 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
+    return "⚠️ 수동확인필요", f"티웨이-수동조회: {kor_name} | PNR: {pnr}"
 
 
 async def run_check(page, target, we_email=""):
@@ -1247,6 +1074,17 @@ async def main():
     print(f"❌ 예약없음      : {no_rsv}건   ← 즉시 확인!")
     print(f"❌ PNR오류       : {pnr_err}건  ← 즉시 확인!")
     print(f"⚠️  수동확인필요  : {manual}건  ← 티웨이항공 직접 조회 필요!")
+
+    # TW 수동확인 목록 출력
+    tw_manual = [t for t in targets if "티웨이" in str(t["airline"]) and "수동확인필요" in str(t["result"])]
+    if tw_manual:
+        print(f"\n{'─'*50}")
+        print(f"  📋 티웨이항공 수동확인 목록 ({len(tw_manual)}건)")
+        print(f"  → 열린 Chrome 창에서 아래 PNR/이름 입력하세요")
+        print(f"{'─'*50}")
+        for t in tw_manual:
+            print(f"  {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']}")
+        print(f"{'─'*50}")
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
 
