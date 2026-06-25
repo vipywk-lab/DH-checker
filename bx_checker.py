@@ -192,7 +192,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -815,7 +815,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공")
+        airline in ("에어부산", "대한항공", "진에어", "티웨이항공")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -1194,10 +1194,17 @@ async def main():
     # TW 수동확인 팝업 (건별 복사 버튼)
     tw_manual = [t for t in targets if "티웨이" in str(t["airline"]) and "수동확인필요" in str(t["result"])]
     if tw_manual:
+        # 같은 PNR은 팝업 1번만 (동행 탑승객은 탑승객 추가 버튼으로 처리)
+        seen_pnr = set()
+        tw_dedup = []
+        for t in tw_manual:
+            if t["pnr"] not in seen_pnr:
+                seen_pnr.add(t["pnr"])
+                tw_dedup.append(t)
         print(f"\n{'─'*52}")
-        print(f"  📋 티웨이항공 수동확인 팝업 실행 중 ({len(tw_manual)}건)")
+        print(f"  📋 티웨이항공 수동확인 팝업 실행 중 ({len(tw_dedup)}건 / 전체 {len(tw_manual)}명)")
         print(f"{'─'*52}")
-        _show_tw_popup(tw_manual, root)
+        _show_tw_popup(tw_dedup, root)
 
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
