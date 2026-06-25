@@ -1,10 +1,11 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.7 (2026-06-25)
-# 변경: TW 자동조회 포기 → 실제 Chrome 자동 오픈 + 수동확인 목록 출력
+# 버전: v2.8 (2026-06-25)
+# 변경: TW 건별 Chrome 탭 오픈 (URL 파라미터 자동입력 시도)
+#       국내선=한글/국제선=영문 이름 구분 출력
 # 문의: 승무계획팀
 # ==========================================
-__version__ = "2.7"
+__version__ = "2.8"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -71,7 +72,6 @@ HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
 
-_TW_BROWSER_OPENED = False  # TW 조회 페이지 최초 1회만 열기
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
 
 
@@ -754,18 +754,36 @@ async def check_we(page, target, we_email):
 
 
 async def check_tw(page, target):
-    """TW는 Akamai Premium으로 자동조회 불가 → 실제 Chrome 열어서 수동 안내"""
-    global _TW_BROWSER_OPENED
+    """TW는 Akamai Premium으로 자동조회 불가 → 건별 URL 파라미터로 Chrome 탭 오픈"""
+    import urllib.parse
     pnr      = target["pnr"]
-    last     = target["last"]
-    first    = target["first"]
     kor_name = target["kor_name"]
+    eng_name = target.get("eng_name", "")
+    dep      = target["dep"]
+    arr      = target["arr"]
 
-    if not _TW_BROWSER_OPENED:
-        webbrowser.open(TW_URL)
-        _TW_BROWSER_OPENED = True
+    # 국내선=한글, 국제선=영문
+    intl = is_international(dep, arr)
+    if intl and eng_name:
+        parts    = eng_name.split("/")
+        name_last  = parts[0].strip() if len(parts) >= 1 else target["last"]
+        name_first = parts[1].strip() if len(parts) >= 2 else target["first"]
+        name_display = f"{name_last}/{name_first} (영문)"
+    else:
+        name_last  = target["last"]
+        name_first = target["first"]
+        name_display = f"{kor_name} (한글)"
 
-    return "⚠️ 수동확인필요", f"티웨이-수동조회: {kor_name} | PNR: {pnr}"
+    # URL 파라미터로 PNR+이름 전달 시도 (TW가 읽어주면 자동입력)
+    params = urllib.parse.urlencode({
+        "pnrNumber": pnr,
+        "lastName": name_last,
+        "firstName": name_first,
+    })
+    url = f"https://www.twayair.com/app/reservation/searchMemberBooking?{params}"
+    webbrowser.open(url)
+
+    return "⚠️ 수동확인필요", f"티웨이-수동조회: {name_display} | PNR: {pnr}"
 
 
 async def run_check(page, target, we_email=""):
@@ -1078,13 +1096,21 @@ async def main():
     # TW 수동확인 목록 출력
     tw_manual = [t for t in targets if "티웨이" in str(t["airline"]) and "수동확인필요" in str(t["result"])]
     if tw_manual:
-        print(f"\n{'─'*50}")
+        print(f"\n{'─'*52}")
         print(f"  📋 티웨이항공 수동확인 목록 ({len(tw_manual)}건)")
-        print(f"  → 열린 Chrome 창에서 아래 PNR/이름 입력하세요")
-        print(f"{'─'*50}")
+        print(f"  → 각 건마다 Chrome 탭이 열립니다 (URL 파라미터 자동입력 시도)")
+        print(f"{'─'*52}")
         for t in tw_manual:
-            print(f"  {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']}")
-        print(f"{'─'*50}")
+            intl = is_international(t["dep"], t["arr"])
+            eng  = t.get("eng_name", "")
+            if intl and eng:
+                parts = eng.split("/")
+                name_str = f"{parts[0].strip()}/{parts[1].strip()} (영문, 국제선)"
+            else:
+                name_str = f"{t['last']} / {t['first']} (한글, 국내선)"
+            print(f"  {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']} | {t['dep']}→{t['arr']}")
+            print(f"         입력이름: {name_str}")
+        print(f"{'─'*52}")
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
 
