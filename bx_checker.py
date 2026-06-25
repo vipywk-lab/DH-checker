@@ -1,10 +1,22 @@
 # ==========================================
 # bx_checker.py
-# 버전: v2.9 (2026-06-25)
-# 변경: TW 수동확인 목록 클립보드 자동 복사 (PNR⇥성⇥이름)
+# 버전: v3.0 (2026-06-25)
 # 문의: 승무계획팀
+#
+# [지원 항공사]
+#   에어부산 / 대한항공 / 진에어 / 파라타항공  → 자동조회
+#   티웨이항공                                 → 반자동 (아래 참고)
+#
+# [티웨이항공 안내]
+#   티웨이 홈페이지는 Akamai Bot Manager 보안이 적용되어
+#   자동조회가 불가합니다.
+#   대신 다음과 같이 처리됩니다:
+#     1. 티웨이 예약이 있으면 조회 완료 후 건별로 Chrome 탭이 자동으로 열립니다.
+#     2. 팝업창이 뜨며 예약번호·성·이름 복사 버튼이 제공됩니다.
+#     3. 복사 버튼 클릭 → Chrome 탭에서 해당 칸에 Ctrl+V 하면 됩니다.
+#     4. [다음 →] 버튼으로 건별로 순서대로 처리합니다.
 # ==========================================
-__version__ = "2.9"
+__version__ = "3.0"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -180,7 +192,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -857,19 +869,114 @@ async def run_check(page, target, we_email=""):
     return result, detail
 
 
+
+def _show_tw_popup(tw_manual, root):
+    """티웨이 수동확인 건별 팝업 — PNR/이름 복사 버튼"""
+    import tkinter as tk
+
+    total = len(tw_manual)
+
+    for idx, t in enumerate(tw_manual):
+        # 이름 결정 (국내=한글, 국제=영문)
+        intl = is_international(t["dep"], t["arr"])
+        eng  = t.get("eng_name", "")
+        if intl and eng:
+            parts      = eng.split("/")
+            name_last  = parts[0].strip()
+            name_first = parts[1].strip() if len(parts) >= 2 else ""
+            name_label = f"{name_last} / {name_first}  (영문)"
+        else:
+            name_last  = t["last"]
+            name_first = t["first"]
+            name_label = f"{name_last} / {name_first}  (한글)"
+
+        pnr = t["pnr"]
+
+        # ── 팝업 윈도우 ──
+        win = tk.Toplevel(root)
+        win.title(f"티웨이 수동확인  [{idx+1}/{total}]")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+
+        pad = dict(padx=16, pady=6)
+
+        tk.Label(win, text=f"[{idx+1}/{total}]  {t['kor_name']}  |  {t['dep']}→{t['arr']}  {t['dep_time']}",
+                 font=("맑은 고딕", 10, "bold")).grid(row=0, column=0, columnspan=3, pady=(14, 4), padx=16)
+
+        # 구분선
+        tk.Frame(win, height=1, bg="#cccccc").grid(row=1, column=0, columnspan=3, sticky="ew", padx=16)
+
+        # 예약번호 행
+        tk.Label(win, text="예약번호", width=8, anchor="e").grid(row=2, column=0, **pad)
+        tk.Label(win, text=pnr, font=("Consolas", 13, "bold"), fg="#c0392b", width=10, anchor="w").grid(row=2, column=1, **pad)
+
+        def _copy_pnr(p=pnr):
+            root.clipboard_clear(); root.clipboard_append(p); root.update()
+            btn_pnr.config(text="✓ 복사됨", fg="green")
+            win.after(1200, lambda: btn_pnr.config(text="복사", fg="black"))
+        btn_pnr = tk.Button(win, text="복사", width=6, command=_copy_pnr)
+        btn_pnr.grid(row=2, column=2, **pad)
+
+        # 이름 행
+        tk.Label(win, text="이  름", width=8, anchor="e").grid(row=3, column=0, **pad)
+        tk.Label(win, text=name_label, font=("맑은 고딕", 11), width=22, anchor="w").grid(row=3, column=1, **pad)
+
+        def _copy_name(last=name_last, first=name_first):
+            root.clipboard_clear(); root.clipboard_append(last); root.update()
+            btn_last.config(text="✓ 성 복사됨", fg="green")
+            win.after(1200, lambda: btn_last.config(text="성 복사", fg="black"))
+        btn_last = tk.Button(win, text="성 복사", width=6, command=_copy_name)
+        btn_last.grid(row=3, column=2, **pad)
+
+        # 이름(first) 행
+        tk.Label(win, text="", width=8).grid(row=4, column=0)
+        tk.Label(win, text="↑ 성 복사 후 → 이름 복사", font=("맑은 고딕", 9), fg="#888888", anchor="w").grid(row=4, column=1, sticky="w", padx=16)
+
+        def _copy_first(first=name_first):
+            root.clipboard_clear(); root.clipboard_append(first); root.update()
+            btn_first.config(text="✓ 이름 복사됨", fg="green")
+            win.after(1200, lambda: btn_first.config(text="이름 복사", fg="black"))
+        btn_first = tk.Button(win, text="이름 복사", width=8, command=_copy_first)
+        btn_first.grid(row=4, column=2, padx=16, pady=2)
+
+        # 구분선
+        tk.Frame(win, height=1, bg="#cccccc").grid(row=5, column=0, columnspan=3, sticky="ew", padx=16, pady=(6,0))
+
+        # 다음/건너뛰기 버튼
+        done = tk.BooleanVar(value=False)
+        btn_frame = tk.Frame(win)
+        btn_frame.grid(row=6, column=0, columnspan=3, pady=12)
+
+        next_text = "다음 →" if idx < total - 1 else "완료 ✓"
+        tk.Button(btn_frame, text=next_text, width=10,
+                  command=lambda: done.set(True)).pack(side="left", padx=8)
+        tk.Button(btn_frame, text="건너뛰기", width=8, fg="#888888",
+                  command=lambda: done.set(True)).pack(side="left", padx=8)
+
+        win.protocol("WM_DELETE_WINDOW", lambda: done.set(True))
+
+        # 화면 중앙 배치
+        win.update_idletasks()
+        w, h = win.winfo_width(), win.winfo_height()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+        win.wait_variable(done)
+        win.destroy()
+
+
 async def main():
-    print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v2.2")
-    print("    (2026-06-25) | 문의: 승무계획팀")
-    print(f"{'='*50}")
-    print(f"  v2.4 변경사항: Chrome 프로필 재사용 (launch_persistent_context)")
-    print(f"         → Akamai 세션쿠키 로딩, 신뢰 점수 향상")
-    print(f"  v2.3 변경사항: 티웨이항공(TW) 자동조회 구현 (Akamai 수동 우회 지원),")
-    print(f"         stealth webdriver 버그 수정, Chrome UA 137 업데이트")
-    print("  v2.1 변경사항: 에어부산 클라우드플레어 우회,")
-    print("         파라타항공 자동조회, 월말 조회 기능,")
-    print("         대한항공 국제선 개선, 동명이인/하이픈 처리")
-    print(f"{'='*50}\n")
+    print(f"{'='*54}")
+    print("  ✈️  타사 예약 자동 검증 시스템  v3.0")
+    print("      2026-06-25  |  문의: 승무계획팀")
+    print(f"{'='*54}")
+    print("  [자동조회]  에어부산 / 대한항공 / 진에어 / 파라타항공")
+    print("  [반자동]    티웨이항공  → Chrome 탭 자동 오픈 + 복사 팝업")
+    print(f"{'─'*54}")
+    print("  v3.0  티웨이 Chrome 탭 자동 오픈 + 건별 복사 팝업")
+    print("  v2.1  에어부산 CF 우회 / 파라타 자동조회 / 월말조회")
+    print("        대한항공 국제선 개선 / 동명이인·하이픈 처리")
+    print(f"{'='*54}\n")
 
     check_for_update()
 
@@ -897,19 +1004,6 @@ async def main():
     print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
-
-    # 티웨이항공 건수 있으면 Chrome 방문 안내 팝업
-    if tw_cnt > 0:
-        messagebox.showinfo(
-            "티웨이항공 조회 전 필수 안내",
-            f"티웨이항공 예약 {tw_cnt}건이 감지되었습니다.\n\n"
-            f"Akamai 보안 우회를 위해 조회 전 아래 작업을 먼저 해주세요:\n\n"
-            f"  1. 크롬(Chrome)을 여세요\n"
-            f"  2. 주소창에 www.twayair.com 을 입력하고 방문하세요\n"
-            f"  3. 페이지가 정상적으로 뜨면 이 창으로 돌아와 확인을 누르세요\n\n"
-            f"※ 이미 최근에 방문한 적 있다면 바로 확인을 눌러도 됩니다."
-        )
-        print("티웨이항공 Chrome 사전 방문 완료 확인됨\n")
 
     # 파라타항공 건수 있으면 이메일 입력 팝업
     we_email = ""
@@ -1097,45 +1191,14 @@ async def main():
     print(f"❌ PNR오류       : {pnr_err}건  ← 즉시 확인!")
     print(f"⚠️  수동확인필요  : {manual}건  ← 티웨이항공 직접 조회 필요!")
 
-    # TW 수동확인 목록 출력
+    # TW 수동확인 팝업 (건별 복사 버튼)
     tw_manual = [t for t in targets if "티웨이" in str(t["airline"]) and "수동확인필요" in str(t["result"])]
     if tw_manual:
         print(f"\n{'─'*52}")
-        print(f"  📋 티웨이항공 수동확인 목록 ({len(tw_manual)}건)")
-        print(f"  → 각 건마다 Chrome 탭이 열립니다")
-        print(f"  → 클립보드: 탭(Tab)키로 PNR→성→이름 순서로 붙여넣기 가능")
+        print(f"  📋 티웨이항공 수동확인 팝업 실행 중 ({len(tw_manual)}건)")
         print(f"{'─'*52}")
+        _show_tw_popup(tw_manual, root)
 
-        clip_lines = []
-        for idx, t in enumerate(tw_manual, 1):
-            intl = is_international(t["dep"], t["arr"])
-            eng  = t.get("eng_name", "")
-            if intl and eng:
-                parts      = eng.split("/")
-                name_last  = parts[0].strip()
-                name_first = parts[1].strip() if len(parts) >= 2 else ""
-                name_str   = f"{name_last}/{name_first} (영문, 국제선)"
-            else:
-                name_last  = t["last"]
-                name_first = t["first"]
-                name_str   = f"{name_last} / {name_first} (한글, 국내선)"
-            print(f"  [{idx}] {t['kor_name']:6} | PNR: {t['pnr']} | {t['dep_time']} | {t['dep']}→{t['arr']}")
-            print(f"       입력이름: {name_str}")
-            # 탭 구분으로 클립보드에 누적 (PNR→성→이름)
-            clip_lines.append(f"{t['pnr']}\t{name_last}\t{name_first}")
-
-        print(f"{'─'*52}")
-
-        # 클립보드에 복사 (탭 구분, 여러 건은 줄바꿈으로 구분)
-        try:
-            clip_text = "\n".join(clip_lines)
-            root.clipboard_clear()
-            root.clipboard_append(clip_text)
-            root.update()
-            print(f"  📋 클립보드 복사 완료 — 첫 번째 탭에서 Ctrl+V 하세요")
-            print(f"     (여러 건: 각 줄이 PNR⇥성⇥이름 순서)")
-        except Exception:
-            pass
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
 
