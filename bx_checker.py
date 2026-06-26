@@ -16,7 +16,7 @@
 #     3. 복사 버튼 클릭 → Chrome 탭에서 해당 칸에 Ctrl+V 하면 됩니다.
 #     4. [다음 →] 버튼으로 건별로 순서대로 처리합니다.
 # ==========================================
-__version__ = "3.0"
+__version__ = "3.1"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -114,24 +114,34 @@ def check_for_update():
 
 
 def get_check_mode():
-    """실행 시 조회 범위 선택 팝업 — 5일 or 월말까지"""
-    from tkinter import simpledialog
+    """실행 시 조회 범위 선택 팝업 — 3가지 옵션"""
     import calendar
-    today = datetime.now()
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    days_to_eom = (last_day - today.day)  # 오늘 포함 안 한 잔여일
+    from tkinter import simpledialog
+    today    = datetime.now()
+    # 이번달 말일
+    this_last = calendar.monthrange(today.year, today.month)[1]
+    days_to_eom = this_last - today.day
+    # 다음달 말일
+    next_month = today.month % 12 + 1
+    next_year  = today.year + (1 if today.month == 12 else 0)
+    next_last  = calendar.monthrange(next_year, next_month)[1]
+    days_to_nom = days_to_eom + next_last  # 이번달 잔여 + 다음달 전체
 
-    answer = messagebox.askquestion(
+    choice = simpledialog.askstring(
         "조회 범위 선택",
-        f"조회 범위를 선택하세요.\n\n"
-        f"  [예]  월말까지 ({today.month}월 {last_day}일, 약 {days_to_eom}일)\n"
-        f"  [아니오]  오늘부터 5일\n\n"
-        f"※ 월말 조회는 딜레이가 자동으로 늘어납니다.",
-        icon="question"
+        f"조회 범위를 입력하세요.\n\n"
+        f"  1  →  오늘부터 5일 (일상 조회)\n"
+        f"  2  →  이번달 말일까지 ({today.month}월 {this_last}일)\n"
+        f"  3  →  다음달 말일까지 ({next_year}년 {next_month}월 {next_last}일)\n\n"
+        f"※ 2·3번은 딜레이가 자동으로 늘어납니다.",
+        parent=root
     )
-    if answer == "yes":
-        return days_to_eom, 3.0, 6.0   # check_days, delay_min, delay_max
-    else:
+
+    if choice == "2":
+        return days_to_eom, 3.0, 6.0
+    elif choice == "3":
+        return days_to_nom, 3.0, 6.0
+    else:  # 1 또는 기타
         return 5, 1.0, 2.0
 
 
@@ -971,12 +981,13 @@ def _show_tw_popup(tw_manual, root):
 
 async def main():
     print(f"{'='*54}")
-    print("  ✈️  타사 예약 자동 검증 시스템  v3.0")
-    print("      2026-06-25  |  문의: 승무계획팀")
+    print("  ✈️  타사 예약 자동 검증 시스템  v3.1")
+    print("      2026-06-27  |  문의: 승무계획팀")
     print(f"{'='*54}")
     print("  [자동조회]  에어부산 / 대한항공 / 진에어 / 파라타항공")
     print("  [반자동]    티웨이항공  → Chrome 탭 자동 오픈 + 복사 팝업")
     print(f"{'─'*54}")
+    print("  v3.1  조회 범위 3가지 선택 (5일/이번달말/다음달말)")
     print("  v3.0  티웨이 Chrome 탭 자동 오픈 + 건별 복사 팝업")
     print("  v2.1  에어부산 CF 우회 / 파라타 자동조회 / 월말조회")
     print("        대한항공 국제선 개선 / 동명이인·하이픈 처리")
