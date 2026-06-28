@@ -16,7 +16,7 @@
 #     3. 복사 버튼 클릭 → Chrome 탭에서 해당 칸에 Ctrl+V 하면 됩니다.
 #     4. [다음 →] 버튼으로 건별로 순서대로 처리합니다.
 # ==========================================
-__version__ = "3.1"
+__version__ = "3.2"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -83,6 +83,12 @@ DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
 
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
+
+# 클라우드플레어 등 봇 차단 페이지 감지 키워드 (전역 공용)
+CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
+               "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare",
+               "Just a moment", "Enable JavaScript", "cf-browser-verification",
+               "Verify you are human", "Security check"]
 
 
 def check_for_update():
@@ -321,11 +327,7 @@ async def check_bx(page, target):
         await page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
         await page.wait_for_timeout(1500)
 
-        # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
-        CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
-                       "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare",
-                       "Just a moment", "Enable JavaScript", "cf-browser-verification",
-                       "Verify you are human", "Security check"]
+        # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내 (CF_KEYWORDS는 전역)
         body_check = await page.inner_text("body")
         if any(kw in body_check for kw in CF_KEYWORDS):
             print(f"\n{'='*50}")
@@ -363,7 +365,9 @@ async def check_bx(page, target):
         try:
             await page.wait_for_selector("text=항공권 구매완료", timeout=10000)
         except:
-            pass
+            body_tmp = await page.inner_text("body")
+            if "항공권 구매완료" not in body_tmp:
+                return "❌ PNR오류", "예약 확인 불가 (조회 결과 없음)"
         await page.wait_for_timeout(1000)
 
         html_content = await page.inner_text("body")
@@ -508,10 +512,20 @@ async def check_ke(page, target):
         try:
             await page.wait_for_selector(".journey-info__date", timeout=20000)
         except:
-            pass
+            # 셀렉터 미발견 — 클래스명 변경 가능성 대비, 본문에서 직접 판정
+            body_tmp = await page.inner_text("body")
+            if any(kw in body_tmp for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
+                return "❌ PNR오류", "예약 확인 불가"
+            # KE 편명이 안 보이면 진짜 미조회 → PNR오류, 보이면 정상 페이지로 간주하고 진행
+            if not re.search(r'KE\s*\d{3,4}', body_tmp):
+                return "❌ PNR오류", "예약 확인 불가 (조회 결과 없음)"
         await page.wait_for_timeout(2000)
 
         html_content = await page.inner_text("body")
+
+        # 파싱 전 클라우드플레어 재체크 (BX와 일관성)
+        if any(kw in html_content for kw in CF_KEYWORDS):
+            return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
 
         if any(kw in html_content for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
             return "❌ PNR오류", "예약 확인 불가"
@@ -556,6 +570,9 @@ async def check_ke(page, target):
 
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        if flt_found == "편명미확인" and date_found == "날짜미확인":
+            return "💥 오류", "파싱 실패 (CF 차단 또는 페이지 미로딩)"
 
         return "✅ 확인완료", detail
 
@@ -627,8 +644,12 @@ async def check_lj(page, target):
 
         html_content = await page.inner_text("body")
 
+        # 파싱 전 클라우드플레어 재체크 (BX/KE와 일관성)
+        if any(kw in html_content for kw in CF_KEYWORDS):
+            return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
+
         if pnr not in html_content:
-            return "💥 오류", "결과 페이지 로드 실패"
+            return "❌ PNR오류", "예약 확인 불가 (PNR 미조회)"
 
         if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
             return "❌ PNR오류", "예약 확인 불가"
@@ -987,7 +1008,7 @@ async def main():
     print("  [자동조회]  에어부산 / 대한항공 / 진에어 / 파라타항공")
     print("  [반자동]    티웨이항공  → Chrome 탭 자동 오픈 + 복사 팝업")
     print(f"{'─'*54}")
-    print("  v3.1  조회 범위 3가지 선택 (5일/이번달말/다음달말)")
+    print("  v3.2  조회 결과 미확인 시 확인완료 오반환 버그 수정 (BX/KE/LJ) + KE 셀렉터 견고화")
     print("  v3.0  티웨이 Chrome 탭 자동 오픈 + 건별 복사 팝업")
     print("  v2.1  에어부산 CF 우회 / 파라타 자동조회 / 월말조회")
     print("        대한항공 국제선 개선 / 동명이인·하이픈 처리")
@@ -1103,8 +1124,9 @@ async def main():
             pnr     = target["pnr"]
             print(f"[{i:02d}/{total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
 
-            if pnr in pnr_cache:
-                result, detail = pnr_cache[pnr]
+            cache_key = (pnr, airline)
+            if cache_key in pnr_cache:
+                result, detail = pnr_cache[cache_key]
                 target["result"] = result
                 target["detail"] = detail
                 print(f"[캐시] {result}  {detail}")
@@ -1113,7 +1135,7 @@ async def main():
                 target["result"] = result
                 target["detail"] = detail
                 if "확인완료" in result:
-                    pnr_cache[pnr] = (result, detail)
+                    pnr_cache[cache_key] = (result, detail)
                 print(f"{result}  {detail}")
                 if i < total:
                     if target["airline"] == "에어부산":
