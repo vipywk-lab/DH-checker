@@ -636,11 +636,23 @@ async def check_lj(page, target):
         await page.wait_for_timeout(800)
         await page.click("button[role='login-button']", timeout=5000)
 
+        # 결과 페이지 URL 도달 대기 (SPA 방식 — 새 탭 아님)
         try:
-            await page.wait_for_selector(f"text={pnr}", timeout=15000)
+            await page.wait_for_url("**/getReservationDetail**", timeout=15000)
         except:
             pass
-        await page.wait_for_timeout(2000)
+
+        # DOM 렌더링 완료 대기
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except:
+            pass
+
+        # PNR span 직접 대기 (기존 text= 보다 정밀)
+        try:
+            await page.wait_for_selector(f"span:has-text('{pnr}')", timeout=10000)
+        except:
+            pass
 
         html_content = await page.inner_text("body")
 
@@ -648,14 +660,15 @@ async def check_lj(page, target):
         if any(kw in html_content for kw in CF_KEYWORDS):
             return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
 
-        if pnr not in html_content:
+        # 대소문자 무관하게 PNR 존재 여부 확인
+        if pnr.upper() not in html_content.upper():
             return "❌ PNR오류", "예약 확인 불가 (PNR 미조회)"
 
         if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
             return "❌ PNR오류", "예약 확인 불가"
 
-        flt_match = re.search(r'LJ\d{3,4}', html_content)
-        flt_found = flt_match.group() if flt_match else "편명미확인"
+        flt_match = re.search(r'LJ\d{3,4}', html_content, re.IGNORECASE)
+        flt_found = flt_match.group().upper() if flt_match else "편명미확인"
 
         date_match = re.search(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
         if date_match:
@@ -667,10 +680,10 @@ async def check_lj(page, target):
             date_found = "날짜미확인"
 
         airports = re.findall(
-            r'\b(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
             r'|CNX|BKK|HKT|NRT|HND|KIX|NGO|CTS|FUK|OKA'
             r'|DAD|SGN|HAN|CXR|PQC|CEB|KLO|TAG|MNL'
-            r'|TPE|HKG|MFM|SIN|DPS|GUM)\b',
+            r'|TPE|HKG|MFM|SIN|DPS|GUM)(?![A-Z0-9])',
             html_content
         )
         if len(airports) >= 2:
