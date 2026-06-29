@@ -1,6 +1,6 @@
 # ==========================================
 # bx_checker.py
-# 버전: v3.2 (2026-06-28)
+# 버전: v3.2.1 (2026-06-29)
 # 문의: 승무계획팀
 #
 # [지원 항공사]
@@ -16,7 +16,7 @@
 #     3. 복사 버튼 클릭 → Chrome 탭에서 해당 칸에 Ctrl+V 하면 됩니다.
 #     4. [다음 →] 버튼으로 건별로 순서대로 처리합니다.
 # ==========================================
-__version__ = "3.2"
+__version__ = "3.2.1"
 VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 import asyncio
@@ -1015,14 +1015,21 @@ def _show_tw_popup(tw_manual, root):
 
 async def main():
     print(f"{'='*54}")
-    print("  ✈️  타사 예약 자동 검증 시스템  v3.2")
-    print("      2026-06-28  |  문의: 승무계획팀")
+    print("  ✈️  타사 예약 자동 검증 시스템  v3.2.1")
+    print("      2026-06-29  |  문의: 승무계획팀")
     print(f"{'='*54}")
     print("  [자동조회]  에어부산 / 대한항공 / 진에어 / 파라타항공")
     print("  [반자동]    티웨이항공  → Chrome 탭 자동 오픈 + 복사 팝업")
     print(f"{'─'*54}")
+    print("  v3.2.1  LJ 조회 결과 페이지 URL 도달 대기 추가 (wait_for_url)")
+    print("          LJ networkidle 렌더링 대기 추가")
+    print("          LJ PNR 감지 selector 정밀화 (span:has-text)")
+    print("          LJ 공항코드 정규식 lookaround 패턴으로 교체 (한글 인접 오탐 방지)")
+    print("          CF_KEYWORDS 전역 스코프로 이동 (NameError 수정)")
+    print("          PNR 캐시 키 (pnr, airline) 튜플로 변경")
+    print("          KE/LJ CF 재체크 추가")
     print("  v3.2  조회 결과 미확인 시 확인완료 오반환 버그 수정 (BX/KE/LJ)")
-    print("        KE 셀렉터 견고화 / 캐시키 (PNR+항공사) / KE·LJ CF재체크")
+    print("        KE 셀렉터 견고화 / KE 파싱 실패 가드 추가")
     print("  v3.1  조회 범위 3가지 선택 (5일/이번달말/다음달말)")
     print("  v3.0  티웨이 Chrome 탭 자동 오픈 + 건별 복사 팝업")
     print("  v2.1  에어부산 CF 우회 / 파라타 자동조회 / 월말조회")
