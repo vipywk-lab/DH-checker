@@ -1,27 +1,5 @@
-# ==========================================
-# bx_checker.py
-# 버전: v3.2.1 (2026-06-29)
-# 문의: 승무계획팀
-#
-# [지원 항공사]
-#   에어부산 / 대한항공 / 진에어 / 파라타항공  → 자동조회
-#   티웨이항공                                 → 반자동 (아래 참고)
-#
-# [티웨이항공 안내]
-#   티웨이 홈페이지는 Akamai Bot Manager 보안이 적용되어
-#   자동조회가 불가합니다.
-#   대신 다음과 같이 처리됩니다:
-#     1. 티웨이 예약이 있으면 조회 완료 후 건별로 Chrome 탭이 자동으로 열립니다.
-#     2. 팝업창이 뜨며 예약번호·성·이름 복사 버튼이 제공됩니다.
-#     3. 복사 버튼 클릭 → Chrome 탭에서 해당 칸에 Ctrl+V 하면 됩니다.
-#     4. [다음 →] 버튼으로 건별로 순서대로 처리합니다.
-# ==========================================
-__version__ = "3.2.1"
-VERSION_URL  = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
-
 import asyncio
 import random
-import webbrowser
 import re
 import logging
 import os
@@ -37,7 +15,7 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-
+__version__ = "3.3.0"
 # ==========================================
 # Playwright Chromium 최초 1회 자동 설치
 # ==========================================
@@ -77,77 +55,32 @@ BX_URL     = "https://www.airbusan.com/web/individual/reserve/index"
 KE_URL     = "https://www.koreanair.com/reservation/search"
 LJ_URL     = "https://www.jinair.com/booking/index"
 WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
-TW_URL     = "https://www.twayair.com/app/reservation/searchMemberBooking#none"
 HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
 
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
 
-# 클라우드플레어 등 봇 차단 페이지 감지 키워드 (전역 공용)
-CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
-               "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare",
-               "Just a moment", "Enable JavaScript", "cf-browser-verification",
-               "Verify you are human", "Security check"]
-
-
-def check_for_update():
-    """GitHub raw URL에서 최신 버전 확인 후 콘솔 알림"""
-    import urllib.request
-    try:
-        with urllib.request.urlopen(VERSION_URL, timeout=5) as resp:
-            for line in resp.read().decode("utf-8").splitlines():
-                if line.startswith("__version__"):
-                    latest = line.split("=")[1].strip().strip('"').strip("'")
-                    def _ver(v):
-                        try:
-                            return tuple(int(x) for x in v.split("."))
-                        except Exception:
-                            return (0,)
-                    if _ver(latest) > _ver(__version__):
-                        print(f"\n{'!'*50}")
-                        print(f"  ⚠️  업데이트 필요: 현재 v{__version__} → 최신 v{latest}")
-                        print(f"  아래 링크에서 최신 버전을 받아주세요:")
-                        print(f"  https://github.com/vipywk-lab/DH-checker")
-                        print(f"{'!'*50}\n")
-                        input("업데이트 후 다시 실행해주세요. 엔터 누르면 종료...")
-                        raise SystemExit("구버전 실행 차단")
-                    else:
-                        print(f"✅ 최신 버전입니다 (v{__version__})")
-                    return
-    except Exception:
-        print("⚠️  버전 확인 실패 (네트워크 연결 없음 — 무시하고 계속 진행)\n")
-
 
 def get_check_mode():
-    """실행 시 조회 범위 선택 팝업 — 3가지 옵션"""
-    import calendar
+    """실행 시 조회 범위 선택 팝업 — 5일 or 월말까지"""
     from tkinter import simpledialog
-    today    = datetime.now()
-    # 이번달 말일
-    this_last = calendar.monthrange(today.year, today.month)[1]
-    days_to_eom = this_last - today.day
-    # 다음달 말일
-    next_month = today.month % 12 + 1
-    next_year  = today.year + (1 if today.month == 12 else 0)
-    next_last  = calendar.monthrange(next_year, next_month)[1]
-    days_to_nom = days_to_eom + next_last  # 이번달 잔여 + 다음달 전체
+    import calendar
+    today = datetime.now()
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    days_to_eom = (last_day - today.day)  # 오늘 포함 안 한 잔여일
 
-    choice = simpledialog.askstring(
+    answer = messagebox.askquestion(
         "조회 범위 선택",
-        f"조회 범위를 입력하세요.\n\n"
-        f"  1  →  오늘부터 5일 (일상 조회)\n"
-        f"  2  →  이번달 말일까지 ({today.month}월 {this_last}일)\n"
-        f"  3  →  다음달 말일까지 ({next_year}년 {next_month}월 {next_last}일)\n\n"
-        f"※ 2·3번은 딜레이가 자동으로 늘어납니다.",
-        parent=root
+        f"조회 범위를 선택하세요.\n\n"
+        f"  [예]  월말까지 ({today.month}월 {last_day}일, 약 {days_to_eom}일)\n"
+        f"  [아니오]  오늘부터 5일\n\n"
+        f"※ 월말 조회는 딜레이가 자동으로 늘어납니다.",
+        icon="question"
     )
-
-    if choice == "2":
-        return days_to_eom, 3.0, 6.0
-    elif choice == "3":
-        return days_to_nom, 3.0, 6.0
-    else:  # 1 또는 기타
+    if answer == "yes":
+        return days_to_eom, 3.0, 6.0   # check_days, delay_min, delay_max
+    else:
         return 5, 1.0, 2.0
 
 
@@ -207,7 +140,7 @@ def load_targets(path, sheet, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -247,7 +180,7 @@ def save_results(path, sheet, targets):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
         kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
             continue
         key = (pnr, airline, kor_name)
         if key in result_map:
@@ -298,12 +231,10 @@ def save_results(path, sheet, targets):
             print(f"\n저장 완료: {path}")
             print(f"→ [확인필요_요약] 시트에서 {error_count}건 확인하세요!" if error_count > 0 else "→ 모든 예약 정상!")
             break
-        except (PermissionError, Exception) as e:
+        except Exception:
             messagebox.showerror(
                 "저장 오류",
-                f"엑셀 파일 저장에 실패했습니다!\n\n"
-                f"파일이 열려있다면 닫고 '확인'을 눌러주세요.\n\n"
-                f"{path}\n\n오류: {str(e)[:80]}"
+                f"엑셀 파일이 열려있거나 저장할 수 없습니다!\n\n{path}\n\n파일을 닫고 '확인'을 눌러주세요."
             )
 
 
@@ -327,7 +258,9 @@ async def check_bx(page, target):
         await page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
         await page.wait_for_timeout(1500)
 
-        # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내 (CF_KEYWORDS는 전역)
+        # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
+        CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
+                       "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
         body_check = await page.inner_text("body")
         if any(kw in body_check for kw in CF_KEYWORDS):
             print(f"\n{'='*50}")
@@ -365,9 +298,7 @@ async def check_bx(page, target):
         try:
             await page.wait_for_selector("text=항공권 구매완료", timeout=10000)
         except:
-            body_tmp = await page.inner_text("body")
-            if "항공권 구매완료" not in body_tmp:
-                return "❌ PNR오류", "예약 확인 불가 (조회 결과 없음)"
+            pass
         await page.wait_for_timeout(1000)
 
         html_content = await page.inner_text("body")
@@ -425,9 +356,6 @@ async def check_bx(page, target):
 
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if flt_found == "편명미확인" and date_found == "날짜미확인":
-            return "💥 오류", "파싱 실패 (CF 차단 또는 페이지 미로딩)"
 
         return "✅ 확인완료", detail
 
@@ -512,20 +440,10 @@ async def check_ke(page, target):
         try:
             await page.wait_for_selector(".journey-info__date", timeout=20000)
         except:
-            # 셀렉터 미발견 — 클래스명 변경 가능성 대비, 본문에서 직접 판정
-            body_tmp = await page.inner_text("body")
-            if any(kw in body_tmp for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
-                return "❌ PNR오류", "예약 확인 불가"
-            # KE 편명이 안 보이면 진짜 미조회 → PNR오류, 보이면 정상 페이지로 간주하고 진행
-            if not re.search(r'KE\s*\d{3,4}', body_tmp):
-                return "❌ PNR오류", "예약 확인 불가 (조회 결과 없음)"
+            pass
         await page.wait_for_timeout(2000)
 
         html_content = await page.inner_text("body")
-
-        # 파싱 전 클라우드플레어 재체크 (BX와 일관성)
-        if any(kw in html_content for kw in CF_KEYWORDS):
-            return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
 
         if any(kw in html_content for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
             return "❌ PNR오류", "예약 확인 불가"
@@ -571,9 +489,6 @@ async def check_ke(page, target):
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
 
-        if flt_found == "편명미확인" and date_found == "날짜미확인":
-            return "💥 오류", "파싱 실패 (CF 차단 또는 페이지 미로딩)"
-
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -605,27 +520,29 @@ async def check_lj(page, target):
         input_last  = last
         input_first = first
 
+    # 진에어는 SPA 구조 — 이전 조회 결과가 페이지에 잔류하므로 매 조회마다 새 탭 사용
+    lj_page = await page.context.new_page()
     try:
-        await page.goto(LJ_URL, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2000)
+        await lj_page.goto(LJ_URL, wait_until="domcontentloaded", timeout=20000)
+        await lj_page.wait_for_timeout(2000)
 
-        await page.click("text=예약조회", timeout=5000)
-        await page.wait_for_timeout(800)
+        await lj_page.click("text=예약조회", timeout=5000)
+        await lj_page.wait_for_timeout(800)
 
-        await page.locator("input[placeholder*='6자리']").first.fill(pnr)
-        await page.wait_for_timeout(300)
+        await lj_page.locator("input[placeholder*='6자리']").first.fill(pnr)
+        await lj_page.wait_for_timeout(300)
 
-        await page.locator("#lastName_resv").fill(input_last)
-        await page.wait_for_timeout(300)
+        await lj_page.locator("#lastName_resv").fill(input_last)
+        await lj_page.wait_for_timeout(300)
 
-        await page.locator("#firstName_resv").fill(input_first)
-        await page.wait_for_timeout(300)
+        await lj_page.locator("#firstName_resv").fill(input_first)
+        await lj_page.wait_for_timeout(300)
 
-        await page.click("#departureDate_resv", timeout=5000)
-        await page.wait_for_timeout(2000)
+        await lj_page.click("#departureDate_resv", timeout=5000)
+        await lj_page.wait_for_timeout(2000)
 
         dep_str = dep_date.strftime("%Y.%m.%d")
-        iframe_locator = page.frame_locator("iframe[src*='basicCalendarLayer']")
+        iframe_locator = lj_page.frame_locator("iframe[src*='basicCalendarLayer']")
 
         try:
             date_input = iframe_locator.locator(f"input[name='hiddenDate'][value^='{dep_str}']")
@@ -633,42 +550,30 @@ async def check_lj(page, target):
         except:
             pass
 
-        await page.wait_for_timeout(800)
-        await page.click("button[role='login-button']", timeout=5000)
+        await lj_page.wait_for_timeout(800)
+        await lj_page.click("button[role='login-button']", timeout=5000)
 
-        # 결과 페이지 URL 도달 대기 (SPA 방식 — 새 탭 아님)
+        # 진에어 내부 예약번호 ≠ 조회 PNR — "여정 예약정보" 텍스트로 성공 판정
         try:
-            await page.wait_for_url("**/getReservationDetail**", timeout=15000)
+            await lj_page.wait_for_selector("text=여정 예약정보", timeout=15000)
         except:
             pass
+        await lj_page.wait_for_timeout(2000)
 
-        # DOM 렌더링 완료 대기
-        try:
-            await page.wait_for_load_state("networkidle", timeout=10000)
-        except:
-            pass
+        html_content = await lj_page.inner_text("body")
 
-        # PNR span 직접 대기 (기존 text= 보다 정밀)
-        try:
-            await page.wait_for_selector(f"span:has-text('{pnr}')", timeout=10000)
-        except:
-            pass
-
-        html_content = await page.inner_text("body")
-
-        # 파싱 전 클라우드플레어 재체크 (BX/KE와 일관성)
+        # CF 재체크
         if any(kw in html_content for kw in CF_KEYWORDS):
             return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
 
-        # 대소문자 무관하게 PNR 존재 여부 확인
-        if pnr.upper() not in html_content.upper():
+        # 성공 판정: "여정 예약정보" 존재 여부
+        if "여정 예약정보" not in html_content:
+            if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
+                return "❌ PNR오류", "예약 확인 불가"
             return "❌ PNR오류", "예약 확인 불가 (PNR 미조회)"
 
-        if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
-            return "❌ PNR오류", "예약 확인 불가"
-
-        flt_match = re.search(r'LJ\d{3,4}', html_content, re.IGNORECASE)
-        flt_found = flt_match.group().upper() if flt_match else "편명미확인"
+        flt_match = re.search(r'LJ\d{3,4}', html_content)
+        flt_found = flt_match.group() if flt_match else "편명미확인"
 
         date_match = re.search(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
         if date_match:
@@ -714,6 +619,8 @@ async def check_lj(page, target):
     except Exception as e:
         logging.error(f"진에어 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
+    finally:
+        await lj_page.close()
 
 
 async def check_we(page, target, we_email):
@@ -817,30 +724,6 @@ async def check_we(page, target, we_email):
         page.remove_listener("dialog", _on_dialog)
 
 
-async def check_tw(page, target):
-    """TW는 Akamai Premium으로 자동조회 불가 → 건별 URL 파라미터로 Chrome 탭 오픈"""
-    import urllib.parse
-    pnr      = target["pnr"]
-    kor_name = target["kor_name"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
-
-    # 국내선=한글, 국제선=영문
-    intl = is_international(dep, arr)
-    if intl and eng_name:
-        parts    = eng_name.split("/")
-        name_last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        name_first = parts[1].strip() if len(parts) >= 2 else target["first"]
-        name_display = f"{name_last}/{name_first} (영문)"
-    else:
-        name_last  = target["last"]
-        name_first = target["first"]
-        name_display = f"{kor_name} (한글)"
-
-    return "⚠️ 수동확인필요", f"티웨이-수동조회: {name_display} | PNR: {pnr}"
-
-
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
     airline  = target["airline"]
@@ -854,8 +737,6 @@ async def run_check(page, target, we_email=""):
         result, detail = await check_lj(page, target)
     elif airline == "파라타항공":
         result, detail = await check_we(page, target, we_email)
-    elif airline == "티웨이항공":
-        result, detail = await check_tw(page, target)
     else:
         return "⬜ 미지원", "지원 항공사 아님"
 
@@ -863,7 +744,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어", "티웨이항공")
+        airline in ("에어부산", "대한항공", "진에어")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -883,14 +764,12 @@ async def run_check(page, target, we_email=""):
             r2, d2 = await check_ke(page, tmp)
         elif airline == "진에어":
             r2, d2 = await check_lj(page, tmp)
-        elif airline == "티웨이항공":
-            r2, d2 = await check_tw(page, tmp)
         if "확인완료" in r2 or "불일치" in r2:
             result = r2
             detail = "[영문재시도] " + d2
 
     # ── 타임아웃/오류 시 1회 재시도 ──
-    elif "타임아웃" in result or ("오류" in result and "파싱" not in detail):
+    elif "타임아웃" in result or ("오류" in result and "PNR" not in result and "파싱" not in detail):
         await asyncio.sleep(2)
         if airline == "에어부산":
             result, detail = await check_bx(page, target)
@@ -900,143 +779,17 @@ async def run_check(page, target, we_email=""):
             result, detail = await check_lj(page, target)
         elif airline == "파라타항공":
             result, detail = await check_we(page, target, we_email)
-        elif airline == "티웨이항공":
-            result, detail = await check_tw(page, target)
         if "타임아웃" not in result:
             detail = "[재시도 성공] " + detail
 
     return result, detail
 
 
-
-def _show_tw_popup(tw_manual, root):
-    """티웨이 수동확인 건별 팝업 — PNR/이름 복사 버튼"""
-    import tkinter as tk
-
-    total = len(tw_manual)
-
-    for idx, t in enumerate(tw_manual):
-        # 이름 결정 (국내=한글, 국제=영문)
-        intl = is_international(t["dep"], t["arr"])
-        eng  = t.get("eng_name", "")
-        if intl and eng:
-            parts      = eng.split("/")
-            name_last  = parts[0].strip()
-            name_first = parts[1].strip() if len(parts) >= 2 else ""
-            name_label = f"{name_last} / {name_first}  (영문)"
-        else:
-            name_last  = t["last"]
-            name_first = t["first"]
-            name_label = f"{name_last} / {name_first}  (한글)"
-
-        pnr = t["pnr"]
-
-        # 팝업 뜨기 직전에 Chrome 탭 열기
-        import urllib.parse
-        params = urllib.parse.urlencode({
-            "pnrNumber": pnr,
-            "lastName": name_last,
-            "firstName": name_first,
-        })
-        webbrowser.open(f"https://www.twayair.com/app/reservation/searchMemberBooking?{params}")
-
-        # ── 팝업 윈도우 ──
-        win = tk.Toplevel(root)
-        win.title(f"티웨이 수동확인  [{idx+1}/{total}]")
-        win.resizable(False, False)
-        win.attributes("-topmost", True)
-
-        pad = dict(padx=16, pady=6)
-
-        tk.Label(win, text=f"[{idx+1}/{total}]  {t['kor_name']}  |  {t['dep']}→{t['arr']}  {t['dep_time']}",
-                 font=("맑은 고딕", 10, "bold")).grid(row=0, column=0, columnspan=3, pady=(14, 4), padx=16)
-
-        # 구분선
-        tk.Frame(win, height=1, bg="#cccccc").grid(row=1, column=0, columnspan=3, sticky="ew", padx=16)
-
-        # 예약번호 행
-        tk.Label(win, text="예약번호", width=8, anchor="e").grid(row=2, column=0, **pad)
-        tk.Label(win, text=pnr, font=("Consolas", 13, "bold"), fg="#c0392b", width=10, anchor="w").grid(row=2, column=1, **pad)
-
-        def _copy_pnr(p=pnr):
-            root.clipboard_clear(); root.clipboard_append(p); root.update()
-            btn_pnr.config(text="✓ 복사됨", fg="green")
-            win.after(1200, lambda: btn_pnr.config(text="복사", fg="black"))
-        btn_pnr = tk.Button(win, text="복사", width=6, command=_copy_pnr)
-        btn_pnr.grid(row=2, column=2, **pad)
-
-        # 이름 행
-        tk.Label(win, text="이  름", width=8, anchor="e").grid(row=3, column=0, **pad)
-        tk.Label(win, text=name_label, font=("맑은 고딕", 11), width=22, anchor="w").grid(row=3, column=1, **pad)
-
-        def _copy_name(last=name_last, first=name_first):
-            root.clipboard_clear(); root.clipboard_append(last); root.update()
-            btn_last.config(text="✓ 성 복사됨", fg="green")
-            win.after(1200, lambda: btn_last.config(text="성 복사", fg="black"))
-        btn_last = tk.Button(win, text="성 복사", width=6, command=_copy_name)
-        btn_last.grid(row=3, column=2, **pad)
-
-        # 이름(first) 행
-        tk.Label(win, text="", width=8).grid(row=4, column=0)
-        tk.Label(win, text="↑ 성 복사 후 → 이름 복사", font=("맑은 고딕", 9), fg="#888888", anchor="w").grid(row=4, column=1, sticky="w", padx=16)
-
-        def _copy_first(first=name_first):
-            root.clipboard_clear(); root.clipboard_append(first); root.update()
-            btn_first.config(text="✓ 이름 복사됨", fg="green")
-            win.after(1200, lambda: btn_first.config(text="이름 복사", fg="black"))
-        btn_first = tk.Button(win, text="이름 복사", width=8, command=_copy_first)
-        btn_first.grid(row=4, column=2, padx=16, pady=2)
-
-        # 구분선
-        tk.Frame(win, height=1, bg="#cccccc").grid(row=5, column=0, columnspan=3, sticky="ew", padx=16, pady=(6,0))
-
-        # 다음/건너뛰기 버튼
-        done = tk.BooleanVar(value=False)
-        btn_frame = tk.Frame(win)
-        btn_frame.grid(row=6, column=0, columnspan=3, pady=12)
-
-        next_text = "다음 →" if idx < total - 1 else "완료 ✓"
-        tk.Button(btn_frame, text=next_text, width=10,
-                  command=lambda: done.set(True)).pack(side="left", padx=8)
-        tk.Button(btn_frame, text="건너뛰기", width=8, fg="#888888",
-                  command=lambda: done.set(True)).pack(side="left", padx=8)
-
-        win.protocol("WM_DELETE_WINDOW", lambda: done.set(True))
-
-        # 화면 중앙 배치
-        win.update_idletasks()
-        w, h = win.winfo_width(), win.winfo_height()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-
-        win.wait_variable(done)
-        win.destroy()
-
-
 async def main():
-    print(f"{'='*54}")
-    print("  ✈️  타사 예약 자동 검증 시스템  v3.2.1")
-    print("      2026-06-29  |  문의: 승무계획팀")
-    print(f"{'='*54}")
-    print("  [자동조회]  에어부산 / 대한항공 / 진에어 / 파라타항공")
-    print("  [반자동]    티웨이항공  → Chrome 탭 자동 오픈 + 복사 팝업")
-    print(f"{'─'*54}")
-    print("  v3.2.1  LJ 조회 결과 페이지 URL 도달 대기 추가 (wait_for_url)")
-    print("          LJ networkidle 렌더링 대기 추가")
-    print("          LJ PNR 감지 selector 정밀화 (span:has-text)")
-    print("          LJ 공항코드 정규식 lookaround 패턴으로 교체 (한글 인접 오탐 방지)")
-    print("          CF_KEYWORDS 전역 스코프로 이동 (NameError 수정)")
-    print("          PNR 캐시 키 (pnr, airline) 튜플로 변경")
-    print("          KE/LJ CF 재체크 추가")
-    print("  v3.2  조회 결과 미확인 시 확인완료 오반환 버그 수정 (BX/KE/LJ)")
-    print("        KE 셀렉터 견고화 / KE 파싱 실패 가드 추가")
-    print("  v3.1  조회 범위 3가지 선택 (5일/이번달말/다음달말)")
-    print("  v3.0  티웨이 Chrome 탭 자동 오픈 + 건별 복사 팝업")
-    print("  v2.1  에어부산 CF 우회 / 파라타 자동조회 / 월말조회")
-    print("        대한항공 국제선 개선 / 동명이인·하이픈 처리")
-    print(f"{'='*54}\n")
-
-    check_for_update()
+    print(f"{'='*50}")
+    print("✈️  타사 예약 자동 검증 시스템 v1.0")
+    print("문의: 승무계획팀")
+    print(f"{'='*50}\n")
 
     # 조회 범위 선택 팝업
     check_days, delay_min, delay_max = get_check_mode()
@@ -1048,7 +801,7 @@ async def main():
     total   = len(targets)
 
     if total == 0:
-        print(f"검증 대상이 없습니다. ({mode_label})")
+        print(f"오늘부터 {CHECK_DAYS}일 이내 검증 대상이 없습니다.")
         input("엔터 누르면 종료...")
         return
 
@@ -1056,10 +809,9 @@ async def main():
     ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
     lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
     we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
-    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이항공")
 
     print(f"검증 대상: {total}건 ({mode_label})")
-    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
+    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
@@ -1085,38 +837,46 @@ async def main():
     ]
     chrome_exe = next((p for p in CHROME_PATHS if os.path.exists(p)), None)
 
+    # Chrome 프로필 경로 (쿠키·히스토리 재사용 → 클라우드플레어 신뢰 점수 향상)
+    chrome_profile = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data")
+    use_profile = chrome_exe and os.path.exists(chrome_profile)
+
     if chrome_exe:
         print(f"시스템 Chrome 사용: {chrome_exe}")
     else:
         print("⚠️  Chrome 미발견 → Playwright Chromium으로 실행 (에어부산 캡챠 발생 가능)")
 
-    LAUNCH_ARGS = [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-infobars",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-extensions",
-    ]
-    CONTEXT_OPTS = dict(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        locale="ko-KR",
-        timezone_id="Asia/Seoul",
-        viewport={"width": 1280, "height": 800},
-        java_script_enabled=True,
-    )
-
+    # Chrome 쿠키 파일 임시 복사 (원본 잠금 회피)
+    import shutil, tempfile
     async with async_playwright() as p:
-        launch_kwargs = dict(headless=HEADLESS, args=LAUNCH_ARGS)
+        launch_kwargs = dict(
+            headless=HEADLESS,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--window-size=1280,800",
+            ]
+        )
         if chrome_exe:
             launch_kwargs["executable_path"] = chrome_exe
-        browser = await p.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(**CONTEXT_OPTS)
 
-        # ── playwright-stealth 적용 ──
+        browser = await p.chromium.launch(**launch_kwargs)
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="ko-KR",
+            timezone_id="Asia/Seoul",
+            viewport={"width": 1280, "height": 800},
+            java_script_enabled=True,
+        )
+
+        # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
         if STEALTH_AVAILABLE:
             stealth = Stealth(
                 navigator_languages_override=("ko-KR", "ko"),
@@ -1124,7 +884,7 @@ async def main():
                 navigator_webdriver=True,
                 chrome_runtime=True,
             )
-            print("playwright-stealth 적용 완료")
+            print("playwright-stealth 적용 완료 (클라우드플레어 우회 시도)")
         else:
             stealth = None
             await context.add_init_script("""
@@ -1136,6 +896,8 @@ async def main():
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
         page = await context.new_page()
+
+        # stealth를 page에 적용
         if stealth:
             await stealth.apply_stealth_async(page)
 
@@ -1156,10 +918,12 @@ async def main():
                 result, detail = await run_check(page, target, we_email)
                 target["result"] = result
                 target["detail"] = detail
+                # 성공한 결과만 캐시에 저장
                 if "확인완료" in result:
                     pnr_cache[cache_key] = (result, detail)
                 print(f"{result}  {detail}")
                 if i < total:
+                    # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
                     if target["airline"] == "에어부산":
                         await asyncio.sleep(random.uniform(5.0, 10.0))
                     else:
@@ -1181,23 +945,7 @@ async def main():
     print(f"⚠️  불일치       : {mismatch}건  ← 즉시 확인!")
     print(f"❌ 예약없음      : {no_rsv}건   ← 즉시 확인!")
     print(f"❌ PNR오류       : {pnr_err}건  ← 즉시 확인!")
-    print(f"⚠️  수동확인필요  : {manual}건  ← 티웨이항공 직접 조회 필요!")
-
-    # TW 수동확인 팝업 (건별 복사 버튼)
-    tw_manual = [t for t in targets if "티웨이" in str(t["airline"]) and "수동확인필요" in str(t["result"])]
-    if tw_manual:
-        # 같은 PNR은 팝업 1번만 (동행 탑승객은 탑승객 추가 버튼으로 처리)
-        seen_pnr = set()
-        tw_dedup = []
-        for t in tw_manual:
-            if t["pnr"] not in seen_pnr:
-                seen_pnr.add(t["pnr"])
-                tw_dedup.append(t)
-        print(f"\n{'─'*52}")
-        print(f"  📋 티웨이항공 수동확인 팝업 실행 중 ({len(tw_dedup)}건 / 전체 {len(tw_manual)}명)")
-        print(f"{'─'*52}")
-        _show_tw_popup(tw_dedup, root)
-
+    print(f"⚠️  수동확인필요  : {manual}건  ← 파라타항공 직접 조회 필요!")
     print(f"💥 오류/재시도   : {error}건")
     input("\n엔터 누르면 종료...")
 
