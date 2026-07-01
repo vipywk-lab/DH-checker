@@ -63,25 +63,61 @@ DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"
 
 
 def get_check_mode():
-    """실행 시 조회 범위 선택 팝업 — 5일 or 월말까지"""
-    from tkinter import simpledialog
+    """실행 시 조회 범위 선택 팝업 — 1:5일 / 2:이번달말 / 3:다음달"""
     import calendar
     today = datetime.now()
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    days_to_eom = (last_day - today.day)  # 오늘 포함 안 한 잔여일
 
-    answer = messagebox.askquestion(
-        "조회 범위 선택",
-        f"조회 범위를 선택하세요.\n\n"
-        f"  [예]  월말까지 ({today.month}월 {last_day}일, 약 {days_to_eom}일)\n"
-        f"  [아니오]  오늘부터 5일\n\n"
-        f"※ 월말 조회는 딜레이가 자동으로 늘어납니다.",
-        icon="question"
-    )
-    if answer == "yes":
-        return days_to_eom, 3.0, 6.0   # check_days, delay_min, delay_max
+    # 이번달 말
+    this_last = calendar.monthrange(today.year, today.month)[1]
+    days_to_eom = this_last - today.day
+
+    # 다음달
+    if today.month == 12:
+        next_year, next_month = today.year + 1, 1
     else:
-        return 5, 1.0, 2.0
+        next_year, next_month = today.year, today.month + 1
+    next_last = calendar.monthrange(next_year, next_month)[1]
+
+    result = [None]
+    popup = tk.Toplevel(root)
+    popup.title("조회 범위 선택")
+    popup.resizable(False, False)
+    popup.grab_set()
+
+    tk.Label(
+        popup,
+        text=(
+            "조회 범위를 선택하세요.\n\n"
+            f"  1.  오늘부터 5일\n"
+            f"  2.  이번달 말까지 ({today.month}월 {this_last}일, 약 {days_to_eom}일)\n"
+            f"  3.  다음달 ({next_year}년 {next_month}월 1일 ~ {next_last}일)\n\n"
+            "※ 2·3번은 딜레이가 자동으로 늘어납니다."
+        ),
+        justify="left",
+        padx=20, pady=15
+    ).pack()
+
+    btn_frame = tk.Frame(popup)
+    btn_frame.pack(pady=(0, 15))
+
+    for n in (1, 2, 3):
+        tk.Button(
+            btn_frame, text=f"  {n}번  ", width=8,
+            command=lambda v=n: [result.__setitem__(0, v), popup.destroy()]
+        ).pack(side="left", padx=8)
+
+    popup.wait_window()
+
+    if result[0] == 2:
+        end = datetime(today.year, today.month, this_last)
+        return "this", today, end, 3.0, 6.0
+    elif result[0] == 3:
+        start = datetime(next_year, next_month, 1)
+        end   = datetime(next_year, next_month, next_last)
+        return "next", start, end, 3.0, 6.0
+    else:  # 1번 또는 팝업 강제 종료
+        end = today + timedelta(days=5)
+        return "5d", today, end, 1.0, 2.0
 
 
 def split_korean_name(name):
@@ -110,19 +146,18 @@ def parse_dep_date(dep_time_str):
     return None
 
 
-def is_within_check_range(dep_time_str, end_date):
+def is_within_check_range(dep_time_str, start_date, end_date):
     dep_date = parse_dep_date(str(dep_time_str))
     if not dep_date:
         return True
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    return today <= dep_date <= end_date
+    return start_date.replace(hour=0, minute=0, second=0, microsecond=0) <= dep_date <= end_date
 
 
 def is_international(dep, arr):
     return dep not in DOMESTIC_AIRPORTS or arr not in DOMESTIC_AIRPORTS
 
 
-def load_targets(path, sheet, end_date):
+def load_targets(path, sheet, start_date, end_date):
     wb = openpyxl.load_workbook(path, keep_vba=True)
     if sheet not in wb.sheetnames:
         messagebox.showerror(
@@ -144,7 +179,7 @@ def load_targets(path, sheet, end_date):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
-        if not is_within_check_range(str(dep_time or ""), end_date):
+        if not is_within_check_range(str(dep_time or ""), start_date, end_date):
             continue
         last, first = split_korean_name(str(kor_name))
         targets.append({
@@ -787,17 +822,20 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v1.0")
+    print("✈️  타사 예약 자동 검증 시스템 v3.3.0")
     print("문의: 승무계획팀")
     print(f"{'='*50}\n")
 
     # 조회 범위 선택 팝업
-    check_days, delay_min, delay_max = get_check_mode()
-    today    = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    end_date = today + timedelta(days=check_days)
-    mode_label = f"{end_date.month}월 {end_date.day}일까지" if check_days > 5 else f"오늘~5일 이내"
+    mode, start_date, end_date, delay_min, delay_max = get_check_mode()
+    if mode == "5d":
+        mode_label = "오늘~5일 이내"
+    elif mode == "this":
+        mode_label = f"이번달 말까지 ({end_date.month}월 {end_date.day}일)"
+    else:
+        mode_label = f"다음달 ({start_date.month}월 {start_date.day}일 ~ {end_date.month}월 {end_date.day}일)"
 
-    targets = load_targets(EXCEL_PATH, SHEET_NAME, end_date)
+    targets = load_targets(EXCEL_PATH, SHEET_NAME, start_date, end_date)
     total   = len(targets)
 
     if total == 0:
