@@ -4,6 +4,7 @@ import re
 import logging
 import os
 import subprocess
+import webbrowser
 from datetime import datetime, timedelta
 import openpyxl
 from tkinter import filedialog, messagebox
@@ -15,13 +16,16 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.3.2"
+__version__ = "3.4.0"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.4.0 (2026-07-03)
+#   - 티웨이항공 조회 추가 (보안 정책상 자동조회 불가 → 팝업으로 안내 후 수동 확인)
+#     PNR/성명/구간/출발일 항목별 [복사] 버튼으로 붙여넣기 지원
 # v3.3.2 (2026-07-03)
 #   - 진에어 조회 시 CF_KEYWORDS 누락으로 매번 오류나던 문제 수정
 # v3.3.1 (2026-07-03)
@@ -76,6 +80,7 @@ BX_URL     = "https://www.airbusan.com/web/individual/reserve/index"
 KE_URL     = "https://www.koreanair.com/reservation/search"
 LJ_URL     = "https://www.jinair.com/booking/index"
 WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
+TW_URL     = "https://www.twayair.com/app/reservation/searchMemberBooking"
 HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
@@ -196,7 +201,7 @@ def load_targets(path, sheet, start_date, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -236,7 +241,7 @@ def save_results(path, sheet, targets):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
         kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         key = (pnr, airline, kor_name)
         if key in result_map:
@@ -778,6 +783,88 @@ async def check_we(page, target, we_email):
         page.remove_listener("dialog", _on_dialog)
 
 
+async def check_tw(page, target):
+    """
+    티웨이항공 — Akamai 봇 차단으로 Playwright 자동 조회/자동입력 불가.
+    Chrome 탭을 열고, 팝업에서 항목별 [복사] 버튼으로 사람이 직접 붙여넣도록 함.
+    (자동 붙여넣기는 Akamai에 감지되어 사용 불가)
+    """
+    pnr      = target["pnr"]
+    kor_name = target["kor_name"]
+    eng_name = target.get("eng_name", "")
+    dep_time = target.get("dep_time", "")
+    dep      = target.get("dep", "")
+    arr      = target.get("arr", "")
+
+    # 조회 페이지를 시스템 기본 브라우저 새 탭으로 오픈
+    webbrowser.open(TW_URL, new=2)
+
+    result_box = [None]
+    popup = tk.Toplevel()
+    popup.title("티웨이항공 수동 확인")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.grab_set()
+
+    tk.Label(
+        popup,
+        text=(
+            "티웨이항공은 보안 정책상 자동 조회가 불가합니다.\n"
+            "새로 열린 Chrome 탭에서 아래 항목을 [복사] 버튼으로 복사해\n"
+            "직접 붙여넣어 조회한 뒤 결과를 선택해주세요."
+        ),
+        justify="left", padx=20, pady=(15, 8)
+    ).pack()
+
+    field_frame = tk.Frame(popup)
+    field_frame.pack(padx=20, pady=5)
+
+    def _copy(value):
+        popup.clipboard_clear()
+        popup.clipboard_append(value)
+
+    def _add_field(row, label, value):
+        tk.Label(field_frame, text=label, width=8, anchor="w").grid(row=row, column=0, sticky="w", pady=3)
+        e = tk.Entry(field_frame, width=26)
+        e.insert(0, value)
+        e.config(state="readonly")
+        e.grid(row=row, column=1, padx=6)
+        tk.Button(field_frame, text="복사", width=6,
+                  command=lambda v=value: _copy(v)).grid(row=row, column=2)
+
+    fields = [("PNR", pnr), ("한글성명", kor_name)]
+    if eng_name:
+        fields.append(("영문성명", eng_name))
+    fields.append(("구간", f"{dep} → {arr}"))
+    fields.append(("출발일", dep_time))
+
+    for i, (label, value) in enumerate(fields):
+        _add_field(i, label, value)
+
+    btn_frame = tk.Frame(popup)
+    btn_frame.pack(pady=(10, 15))
+
+    def _choose(v):
+        result_box[0] = v
+        popup.destroy()
+
+    tk.Button(btn_frame, text="✅ 확인완료", width=12,
+              command=lambda: _choose("ok")).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="❌ PNR오류", width=12,
+              command=lambda: _choose("pnr_error")).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="⏭ 보류(건너뛰기)", width=14,
+              command=lambda: _choose("skip")).pack(side="left", padx=6)
+
+    popup.wait_window()
+
+    if result_box[0] == "ok":
+        return "✅ 확인완료", "[수동확인] 예약 확인됨"
+    elif result_box[0] == "pnr_error":
+        return "❌ PNR오류", "[수동확인] 예약 확인 불가"
+    else:
+        return "⚠️ 수동확인필요", "[수동확인] 보류됨 — 재확인 필요"
+
+
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
     airline  = target["airline"]
@@ -791,6 +878,9 @@ async def run_check(page, target, we_email=""):
         result, detail = await check_lj(page, target)
     elif airline == "파라타항공":
         result, detail = await check_we(page, target, we_email)
+    elif airline == "티웨이항공":
+        # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
+        return await check_tw(page, target)
     else:
         return "⬜ 미지원", "지원 항공사 아님"
 
@@ -841,7 +931,7 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v3.3.2")
+    print("✈️  타사 예약 자동 검증 시스템 v3.4.0")
     print("문의: 승무계획팀")
     print(f"{'='*50}\n")
 
@@ -866,9 +956,10 @@ async def main():
     ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
     lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
     we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
+    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이항공")
 
     print(f"검증 대상: {total}건 ({mode_label})")
-    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건")
+    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
