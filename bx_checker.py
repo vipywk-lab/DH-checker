@@ -16,16 +16,24 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.4.1"
+__version__ = "3.5.2"
+VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 티웨이항공 조회 팝업이 뜨지 않던 오류 수정"
+LATEST_CHANGELOG = "  - 실행 창 제목표시줄에 버전 표시 (파일 안 열어도 버전 확인 가능)"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.5.2 (2026-07-03)
+#   - 실행 창 제목표시줄에 버전 자동 표시 (파일명에 버전 안 넣어도 됨)
+# v3.5.1 (2026-07-03)
+#   - 티웨이 영문 성/이름 분리 복사 재적용 (직전 버전에서 누락됐던 것 복원)
+#   - 자동화 창(about:blank)이 티웨이 창으로 오인되지 않게 안내문구 표시
+# v3.5.0 (2026-07-03)
+#   - GitHub 버전체크 실제 연동 (구버전이면 실행 시 자동 안내 후 차단)
 # v3.4.1 (2026-07-03)
 #   - 티웨이 팝업 실행 시 TclError로 죽던 오류 수정 (Label 위젯 옵션 오류)
 # v3.4.0 (2026-07-03)
@@ -47,6 +55,38 @@ CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "C
 # ==========================================
 # Playwright Chromium 최초 1회 자동 설치
 # ==========================================
+def check_for_update():
+    """GitHub raw URL에서 최신 버전 확인 — 구버전이면 실행 차단"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(VERSION_URL, timeout=5) as resp:
+            for line in resp.read().decode("utf-8").splitlines():
+                if line.startswith("__version__"):
+                    latest = line.split("=")[1].strip().strip('"').strip("'")
+
+                    def _ver(v):
+                        try:
+                            return tuple(int(x) for x in v.split("."))
+                        except Exception:
+                            return (0,)
+
+                    if _ver(latest) > _ver(__version__):
+                        print(f"\n{'!'*50}")
+                        print(f"  ⚠️  업데이트 필요: 현재 v{__version__} → 최신 v{latest}")
+                        print(f"  최신 파일을 다시 받아서 교체해주세요.")
+                        print(f"  (프로젝트 채팅에서 새 bx_checker.py를 다운로드)")
+                        print(f"{'!'*50}\n")
+                        input("업데이트 후 다시 실행해주세요. 엔터 누르면 종료...")
+                        raise SystemExit("구버전 실행 차단")
+                    else:
+                        print(f"✅ 최신 버전입니다 (v{__version__})")
+                    return
+    except Exception:
+        print("⚠️  버전 확인 실패 (네트워크 연결 없음 — 무시하고 계속 진행)\n")
+
+
+check_for_update()
+
 chromium_path = os.path.expanduser("~\\AppData\\Local\\ms-playwright")
 if not os.path.exists(chromium_path):
     print("기반 시스템(브라우저)을 설치 중입니다. 최초 1회만 진행되며 시간이 조금 걸릴 수 있습니다...")
@@ -206,7 +246,7 @@ def load_targets(path, sheet, start_date, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("티웨이항공",):
+        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -801,7 +841,22 @@ async def check_tw(page, target):
     dep      = target.get("dep", "")
     arr      = target.get("arr", "")
 
-    # 조회 페이지를 시스템 기본 브라우저 새 탭으로 오픈
+    # 자동화 창(Playwright)은 티웨이 작업에 쓰지 않음 — 혼동 방지용 안내 문구 표시
+    try:
+        await page.goto(
+            "data:text/html,"
+            "<html><body style='font-family:sans-serif;padding:60px;"
+            "font-size:22px;color:#333;text-align:center;'>"
+            "이 창은 자동화 전용입니다.<br><br>"
+            "티웨이항공 조회는<br>"
+            "<b>새로 열린 별도의 브라우저 창</b>에서 진행해주세요."
+            "</body></html>",
+            timeout=5000
+        )
+    except Exception:
+        pass  # 안내 문구 표시 실패해도 조회 자체엔 영향 없음
+
+    # 조회 페이지를 시스템 기본 브라우저의 새 창으로 오픈
     webbrowser.open(TW_URL, new=2)
 
     result_box = [None]
@@ -815,8 +870,10 @@ async def check_tw(page, target):
         popup,
         text=(
             "티웨이항공은 보안 정책상 자동 조회가 불가합니다.\n"
-            "새로 열린 Chrome 탭에서 아래 항목을 [복사] 버튼으로 복사해\n"
-            "직접 붙여넣어 조회한 뒤 결과를 선택해주세요."
+            "방금 새로 열린 별도의 브라우저 창에서\n"
+            "(자동화 창 아님 — about:blank 창은 무시하세요)\n"
+            "아래 항목을 [복사] 버튼으로 복사해 붙여넣어\n"
+            "직접 조회한 뒤 결과를 선택해주세요."
         ),
         justify="left", padx=20
     ).pack(pady=(15, 8))
@@ -839,7 +896,12 @@ async def check_tw(page, target):
 
     fields = [("PNR", pnr), ("한글성명", kor_name)]
     if eng_name:
-        fields.append(("영문성명", eng_name))
+        parts = eng_name.split("/")
+        eng_last  = parts[0].strip() if len(parts) >= 1 else eng_name
+        eng_first = parts[1].strip() if len(parts) >= 2 else ""
+        fields.append(("영문성", eng_last))
+        if eng_first:
+            fields.append(("영문이름", eng_first))
     fields.append(("구간", f"{dep} → {arr}"))
     fields.append(("출발일", dep_time))
 
@@ -935,6 +997,7 @@ async def run_check(page, target, we_email=""):
 
 
 async def main():
+    os.system(f"title 타사 예약 자동 검증 시스템 v{__version__}")
     print(f"{'='*50}")
     print(f"✈️  타사 예약 자동 검증 시스템 v{__version__}")
     print("문의: 승무계획팀")
