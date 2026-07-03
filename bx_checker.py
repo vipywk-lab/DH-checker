@@ -16,13 +16,18 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.4.0"
+__version__ = "3.4.1"
+
+# 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
+LATEST_CHANGELOG = "  - 티웨이항공 조회 팝업이 뜨지 않던 오류 수정"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.4.1 (2026-07-03)
+#   - 티웨이 팝업 실행 시 TclError로 죽던 오류 수정 (Label 위젯 옵션 오류)
 # v3.4.0 (2026-07-03)
 #   - 티웨이항공 조회 추가 (보안 정책상 자동조회 불가 → 팝업으로 안내 후 수동 확인)
 #     PNR/성명/구간/출발일 항목별 [복사] 버튼으로 붙여넣기 지원
@@ -201,7 +206,7 @@ def load_targets(path, sheet, start_date, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("티웨이항공",):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -813,8 +818,8 @@ async def check_tw(page, target):
             "새로 열린 Chrome 탭에서 아래 항목을 [복사] 버튼으로 복사해\n"
             "직접 붙여넣어 조회한 뒤 결과를 선택해주세요."
         ),
-        justify="left", padx=20, pady=(15, 8)
-    ).pack()
+        justify="left", padx=20
+    ).pack(pady=(15, 8))
 
     field_frame = tk.Frame(popup)
     field_frame.pack(padx=20, pady=5)
@@ -931,8 +936,11 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v3.4.0")
+    print(f"✈️  타사 예약 자동 검증 시스템 v{__version__}")
     print("문의: 승무계획팀")
+    print(f"{'='*50}")
+    print(f"오류 로그 저장 위치: {LOG_PATH}")
+    print(f"\n[이번 버전 변경사항]\n{LATEST_CHANGELOG}\n")
     print(f"{'='*50}\n")
 
     # 조회 범위 선택 팝업
