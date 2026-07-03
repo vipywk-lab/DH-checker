@@ -15,9 +15,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.3.1"
+__version__ = "3.3.2"
+
+# 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
+CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
+               "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.3.2 (2026-07-03)
+#   - 진에어 조회 시 CF_KEYWORDS 누락으로 매번 오류나던 문제 수정
 # v3.3.1 (2026-07-03)
 #   - "재시도 성공" 오표시 수정 (재시도 실패해도 성공으로 표시되던 문제)
 #   - 오류 로그 파일이 엉뚱한 폴더에 생기던 문제 수정
@@ -43,7 +49,6 @@ if not os.path.exists(chromium_path):
 
 # ==========================================
 # 로깅 설정 (오류 발생 시 텍스트 파일로 저장)
-# 실행 위치(cwd)와 무관하게 항상 스크립트 폴더에 저장
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(SCRIPT_DIR, f"에러로그_{datetime.now().strftime('%Y%m%d')}.txt")
@@ -310,8 +315,6 @@ async def check_bx(page, target):
         await page.wait_for_timeout(1500)
 
         # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
-        CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
-                       "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
         body_check = await page.inner_text("body")
         if any(kw in body_check for kw in CF_KEYWORDS):
             print(f"\n{'='*50}")
@@ -838,10 +841,9 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v3.3.1")
+    print("✈️  타사 예약 자동 검증 시스템 v3.3.2")
     print("문의: 승무계획팀")
-    print(f"{'='*50}")
-    print(f"오류 로그 저장 위치: {LOG_PATH}\n")
+    print(f"{'='*50}\n")
 
     # 조회 범위 선택 팝업
     mode, start_date, end_date, delay_min, delay_max = get_check_mode()
