@@ -15,14 +15,17 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.3.0"
+__version__ = "3.3.1"
 # ==========================================
 # 체인지로그
+# v3.3.1 (2026-07-03)
+#   - "재시도 성공" 오표시 수정 (재시도 실패해도 성공으로 표시되던 문제)
+#   - 오류 로그 파일이 엉뚱한 폴더에 생기던 문제 수정
+#     (스크립트 폴더에 고정 저장 + 실행 시 저장 경로 안내)
 # v3.3.0 (2026-07-01)
 #   - 진에어 조회 오류 수정 (정상 예약도 PNR오류로 뜨던 문제)
 #   - 조회 범위 선택 1/2/3 버튼 복원
 #     (1: 오늘~5일 / 2: 이번달말 / 3: 다음달)
-#   - 잘못된 재시도·[재시도 성공] 오표시 수정
 # v3.2.1
 #   - 일부 항공사 조회 결과 오판정 수정
 #   - 에어부산 클라우드플레어 대응 강화
@@ -40,9 +43,12 @@ if not os.path.exists(chromium_path):
 
 # ==========================================
 # 로깅 설정 (오류 발생 시 텍스트 파일로 저장)
+# 실행 위치(cwd)와 무관하게 항상 스크립트 폴더에 저장
 # ==========================================
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(SCRIPT_DIR, f"에러로그_{datetime.now().strftime('%Y%m%d')}.txt")
 logging.basicConfig(
-    filename=f"에러로그_{datetime.now().strftime('%Y%m%d')}.txt",
+    filename=LOG_PATH,
     level=logging.ERROR,
     format='%(asctime)s [%(levelname)s] %(message)s',
     encoding='utf-8'
@@ -824,7 +830,7 @@ async def run_check(page, target, we_email=""):
             result, detail = await check_lj(page, target)
         elif airline == "파라타항공":
             result, detail = await check_we(page, target, we_email)
-        if "타임아웃" not in result:
+        if "확인완료" in result or "불일치" in result:
             detail = "[재시도 성공] " + detail
 
     return result, detail
@@ -832,9 +838,10 @@ async def run_check(page, target, we_email=""):
 
 async def main():
     print(f"{'='*50}")
-    print("✈️  타사 예약 자동 검증 시스템 v3.3.0")
+    print("✈️  타사 예약 자동 검증 시스템 v3.3.1")
     print("문의: 승무계획팀")
-    print(f"{'='*50}\n")
+    print(f"{'='*50}")
+    print(f"오류 로그 저장 위치: {LOG_PATH}\n")
 
     # 조회 범위 선택 팝업
     mode, start_date, end_date, delay_min, delay_max = get_check_mode()
