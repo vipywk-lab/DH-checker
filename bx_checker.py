@@ -16,17 +16,24 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.7.2"
+__version__ = "3.8.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 달력: API 방식 되돌리고 클릭 방식 + 대기시간 증가로 재시도"
+LATEST_CHANGELOG = "  - 제주항공 안내 팝업을 처음 보는 사람도 따라할 수 있게 단계별로 상세화"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.8.1 (2026-07-04)
+#   - 제주항공 팝업 문구를 ①②③④ 단계별로 상세화 — 배경 설명 없이 처음 보는
+#     팀원도 무엇을 해야 할지 바로 알 수 있게 (어느 창인지, 오류 아님을 명시)
+# v3.8.0 (2026-07-04)
+#   - 제주항공: 달력 자동 클릭이 계속 불안정해서 하이브리드 방식으로 전환
+#     (PNR/이름 입력은 그대로 자동, 달력 날짜 선택만 팝업으로 사람에게 요청,
+#      완료 버튼 누르면 조회~결과판정은 계속 자동 진행)
 # v3.7.2 (2026-07-04)
 #   - 제주항공 달력: JS API(setDate) 방식이 사이트 자체 모달 상태와 충돌해서
 #     수동 클릭조차 반응 없어지는 부작용 발생 → 클릭 방식으로 되돌림
@@ -1025,6 +1032,53 @@ async def _dismiss_ad_popup(p):
         pass
 
 
+def _prompt_jj_calendar(pnr, kor_name, target_date_display):
+    """
+    제주항공 달력 자동 클릭이 불안정해서, 입력값은 자동으로 채워두고
+    달력 날짜 선택만 사람이 직접 하도록 안내하는 팝업.
+    나머지(조회, 결과판정)는 계속 자동 진행됨.
+    """
+    result_box = [None]
+    popup = tk.Toplevel()
+    popup.title("제주항공 - 날짜 선택 필요")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.grab_set()
+
+    tk.Label(
+        popup,
+        text=(
+            "※ 제주항공은 보안 정책상 날짜 자동 선택이 안 됩니다.\n"
+            "   (오류 아님 — 아래 순서대로만 해주시면 됩니다)\n\n"
+            f"  탑승객 : {kor_name}\n"
+            f"  PNR    : {pnr}\n"
+            f"  출발일 : {target_date_display}\n\n"
+            "① 지금 열려있는 자동화 Chrome 창을 클릭해서 앞으로 가져오세요\n"
+            "   (이미 달력이 떠 있는 상태입니다)\n"
+            "② 달력에서 위 '출발일' 날짜를 클릭하세요\n"
+            "③ '선택' 버튼을 클릭하세요 (달력이 닫힘)\n"
+            "④ 아래 [완료] 버튼을 눌러주세요 → 이후 조회는 자동으로 진행됩니다\n\n"
+            "날짜가 헷갈리거나 실수했으면 [건너뛰기]를 눌러주세요."
+        ),
+        justify="left", padx=20, pady=15
+    ).pack()
+
+    btn_frame = tk.Frame(popup)
+    btn_frame.pack(pady=(0, 15))
+
+    def _choose(v):
+        result_box[0] = v
+        popup.destroy()
+
+    tk.Button(btn_frame, text="✅ 완료 — 계속 진행", width=16,
+              command=lambda: _choose("done")).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="⏭ 건너뛰기", width=12,
+              command=lambda: _choose("skip")).pack(side="left", padx=6)
+
+    popup.wait_window()
+    return result_box[0]
+
+
 async def check_jj(page, target):
     """
     제주항공 — 조회 페이지(viewOnOffReservationList.do)에서 입력 후
@@ -1071,44 +1125,27 @@ async def check_jj(page, target):
         await jj_page.locator("#psInputFirstName_1").press("Tab")
         await jj_page.wait_for_timeout(300)
 
-        # 탑승일자 달력 선택
+        # 탑승일자 달력 선택 — 자동 클릭이 계속 불안정해서 사람이 직접 선택하도록 전환
+        # (입력값은 이미 자동으로 채워짐, 달력 클릭만 사람이 하고 나머지는 자동 진행)
         await jj_page.click("#boardingDateBtn", timeout=5000)
         await jj_page.wait_for_selector("#datepicker01", timeout=5000)
-
-        # 사이트 자체 JS 초기화가 늦게 끝나는 것으로 추정 — 넉넉하게 대기
-        await jj_page.wait_for_timeout(3000)
-
-        # 시차 두고 뜨는 광고 팝업이 달력을 가릴 수 있어 한 번 더 확인
+        await jj_page.wait_for_timeout(500)
         await _dismiss_ad_popup(jj_page)
 
-        # flatpickr 구조: 실제 클릭 요소는 span.flatpickr-day (aria-label="YYYYMMDD")
-        # (JS API로 직접 세팅하는 방식은 사이트 자체 모달 상태와 안 맞아 오히려 더 꼬였음 → 클릭 방식 복귀)
-        target_label = dep_date.strftime("%Y%m%d")
+        target_date_display = dep_date.strftime("%Y-%m-%d (%a)")
+        choice = _prompt_jj_calendar(pnr, target["kor_name"], target_date_display)
+
+        if choice != "done":
+            return "⚠️ 수동확인필요", "[제주달력] 사용자가 건너뜀"
+
+        # 사람이 선택 완료했는지 값 확인 (최대 3초)
         date_selected = False
         try:
-            date_cell = jj_page.locator(
-                f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']:not(.hidden):not(.flatpickr-disabled)"
+            await jj_page.wait_for_function(
+                "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
+                timeout=3000
             )
-            await date_cell.first.click()
-
-            # 실제로 값이 채워질 때까지 확인 (최대 5초)
-            try:
-                await jj_page.wait_for_function(
-                    "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
-                    timeout=5000
-                )
-                date_selected = True
-            except Exception:
-                pass
-
-            # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
-            await jj_page.click("#chooseDepDateBtn", timeout=3000)
-
-            # 달력이 실제로 닫힐 때까지 대기 (다음 단계에서 조회버튼이 계속 disabled인 문제 방지)
-            try:
-                await jj_page.wait_for_selector("#datepicker01", state="hidden", timeout=3000)
-            except Exception:
-                pass
+            date_selected = True
         except Exception:
             pass
 
