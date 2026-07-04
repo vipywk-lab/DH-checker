@@ -16,17 +16,27 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.3"
+__version__ = "3.6.6"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 광고 팝업 닫기버튼 정확한 셀렉터로 반영"
+LATEST_CHANGELOG = "  - 제주항공 달력 날짜 클릭 진짜 원인 수정 (안 보이는 요소 클릭하던 버그)"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.6 (2026-07-04)
+#   - 제주항공 달력(flatpickr) 실제 원인 수정: aria-hidden="true"인 안 보이는
+#     보조 라벨(span.date)을 클릭하고 있었음 → 실제 클릭요소(span.flatpickr-day,
+#     aria-label="YYYYMMDD" 기준)로 교체. 두 달 동시 표시 구조라 날짜 중복 문제도 해결
+# v3.6.5 (2026-07-04)
+#   - 제주항공 달력: 초기화 대기시간 500ms→1200ms + hover 예열 추가
+#     (열리자마자 클릭하면 반응 안 하던 문제 대응, 아직 검증 필요)
+# v3.6.4 (2026-07-04)
+#   - 제주항공 달력: 날짜 클릭 후 "선택" 확정버튼(#chooseDepDateBtn) 클릭 누락 수정
+#   - 광고 팝업 닫기: iframe 내부까지 탐색하도록 확장
 # v3.6.3 (2026-07-04)
 #   - 제주항공 광고 팝업 닫기버튼 셀렉터를 실제 확인된 값(그루비 아이콘 src)으로 교체
 # v3.6.2 (2026-07-04)
@@ -954,7 +964,7 @@ async def check_tw(page, target):
 async def _dismiss_ad_popup(p):
     """
     사이트 진입 시 뜨는 마케팅 팝업(그루비 등) 자동 닫기 시도.
-    사이트마다 구조가 달라 정확한 셀렉터를 알 수 없으므로 여러 후보를 순서대로 시도.
+    그루비 팝업은 iframe 안에 들어있는 경우가 많아 메인 프레임 + 모든 iframe을 순회.
     실패해도 조회 자체엔 영향 없게 조용히 넘어감.
     """
     candidates = [
@@ -968,15 +978,21 @@ async def _dismiss_ad_popup(p):
         "[class*='btn-close']",
         "text=닫기",
     ]
-    for selector in candidates:
-        try:
-            el = p.locator(selector).first
-            if await el.is_visible(timeout=1000):
-                await el.click(timeout=1000)
-                await p.wait_for_timeout(300)
-                return
-        except Exception:
-            continue
+
+    # 메인 프레임 + 모든 iframe(그루비는 보통 iframe으로 삽입됨) 순회
+    frames_to_check = [p] + list(p.frames)
+
+    for frame in frames_to_check:
+        for selector in candidates:
+            try:
+                el = frame.locator(selector).first
+                if await el.is_visible(timeout=800):
+                    await el.click(timeout=800)
+                    await p.wait_for_timeout(300)
+                    return
+            except Exception:
+                continue
+
     try:
         await p.keyboard.press("Escape")
     except Exception:
@@ -1032,17 +1048,27 @@ async def check_jj(page, target):
         # 탑승일자 달력 선택
         await jj_page.click("#boardingDateBtn", timeout=5000)
         await jj_page.wait_for_selector("#datepicker01", timeout=5000)
-        await jj_page.wait_for_timeout(500)
+        await jj_page.wait_for_timeout(1200)
 
         # 시차 두고 뜨는 광고 팝업이 달력을 가릴 수 있어 한 번 더 확인
         await _dismiss_ad_popup(jj_page)
 
-        day_str = str(dep_date.day)
+        # 달력이 열리자마자 클릭하면 반응 안 하는 경우가 있어, hover로 예열 (클릭은 위험해서 안 함)
         try:
-            date_cell = jj_page.locator(
-                "#datepicker01 span.date", has_text=re.compile(rf'^{day_str}$')
-            )
+            await jj_page.locator("#datepicker01").hover(timeout=1000)
+            await jj_page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+        # flatpickr 구조: 실제 클릭 요소는 span.flatpickr-day (aria-label="YYYYMMDD")
+        # 이전에 쓰던 span.date는 aria-hidden="true"인 화면에 안 보이는 보조 라벨이었음
+        target_label = dep_date.strftime("%Y%m%d")
+        try:
+            date_cell = jj_page.locator(f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']")
             await date_cell.first.click()
+            await jj_page.wait_for_timeout(300)
+            # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
+            await jj_page.click("#chooseDepDateBtn", timeout=3000)
         except Exception:
             pass
 
