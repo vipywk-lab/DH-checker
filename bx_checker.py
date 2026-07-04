@@ -16,17 +16,21 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.8.3"
+__version__ = "3.8.4"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공: 날짜만 클릭하면 나머지(선택/조회) 전부 자동 진행되도록 개선"
+LATEST_CHANGELOG = "  - 제주항공 광고 닫기 로직 재설계 (일반클릭→부모→JS 3단계 폴백)"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.8.4 (2026-07-04)
+#   - 광고 닫기 로직 완전 재설계 — 확인된 실물 셀렉터 하나만 정확히 겨냥
+#     일반 클릭 → 부모 요소 클릭 → JS 직접 클릭 3단계 폴백으로 확실히 잡음
+#     (앞사람 조회에서 광고가 안 닫혀 뒷사람도 실패하던 문제 대응)
 # v3.8.3 (2026-07-04)
 #   - 제주항공: 사이트 "선택" 버튼 자동 클릭 추가 (사람이 안 눌러도 자동 진행)
 #   - 광고 팝업 재정리를 팝업 완료 직후에도 수행 (뒷사람 조회 실패 방지)
@@ -1005,40 +1009,50 @@ async def check_tw(page, target):
 
 async def _dismiss_ad_popup(p):
     """
-    사이트 진입 시 뜨는 마케팅 팝업(그루비 등) 자동 닫기 시도.
-    그루비 팝업은 iframe 안에 들어있는 경우가 많아 메인 프레임 + 모든 iframe을 순회.
-    실패해도 조회 자체엔 영향 없게 조용히 넘어감.
+    그루비 광고 팝업 닫기 — 확인된 실물 셀렉터 하나만 정확히 겨냥.
+    실물 img 태그: <img src="...groobee.io/image/close/..." alt="닫기" class="img_999999">
+    실패해도 조회에 영향 없게 조용히 넘어감.
     """
-    candidates = [
-        "img[src*='groobee.io/image/close']",  # 제주항공에서 실제 확인된 그루비 닫기 아이콘
-        "img[alt*='닫기']",
-        "[class*='groobee'] [class*='close']",
-        "[id*='groobee'] [class*='close']",
-        "[class*='popup'] [class*='close']",
-        "[class*='layer'] [class*='close']",
-        "button[class*='close']",
-        "[class*='btn-close']",
-        "text=닫기",
-    ]
+    close_selector = "img[src*='groobee.io/image/close']"
 
-    # 메인 프레임 + 모든 iframe(그루비는 보통 iframe으로 삽입됨) 순회
-    frames_to_check = [p] + list(p.frames)
-
-    for frame in frames_to_check:
-        for selector in candidates:
+    async def _try_close(scope):
+        try:
+            loc = scope.locator(close_selector).first
+            if not await loc.is_visible(timeout=500):
+                return False
+            # 1) 일반 클릭 시도
             try:
-                el = frame.locator(selector).first
-                if await el.is_visible(timeout=800):
-                    await el.click(timeout=800)
-                    await p.wait_for_timeout(300)
-                    return
+                await loc.click(timeout=800)
+                return True
             except Exception:
-                continue
+                pass
+            # 2) 부모 요소 클릭 (img가 클릭 이벤트를 부모에 위임하는 경우)
+            try:
+                await loc.evaluate("el => (el.closest('a,button,div[onclick]') || el.parentElement).click()")
+                return True
+            except Exception:
+                pass
+            # 3) JS 직접 클릭 (오버레이/z-index 무시)
+            try:
+                await loc.evaluate("el => el.click()")
+                return True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return False
 
-    try:
-        await p.keyboard.press("Escape")
-    except Exception:
-        pass
+    # 최대 3회 시도 (팝업이 여러 개 겹쳐 있는 경우 대비)
+    for _ in range(3):
+        closed_any = False
+        # 메인 프레임 + 모든 iframe 순회 (그루비는 iframe에 들어있기도 함)
+        for scope in [p] + list(p.frames):
+            if await _try_close(scope):
+                closed_any = True
+                await p.wait_for_timeout(400)
+                break
+        if not closed_any:
+            break
 
 
 def _prompt_jj_calendar(pnr, kor_name, target_date_display):
