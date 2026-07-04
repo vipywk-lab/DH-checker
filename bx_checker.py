@@ -16,17 +16,22 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.5.2"
+__version__ = "3.6.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 실행 창 제목표시줄에 버전 표시 (파일 안 열어도 버전 확인 가능)"
+LATEST_CHANGELOG = "  - 제주항공 조회버튼 실제 셀렉터 반영"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.1 (2026-07-03)
+#   - 제주항공 조회버튼 실제 셀렉터(#searchResvBtn) 반영 + 비활성화 해제 대기 추가
+# v3.6.0 (2026-07-03)
+#   - 제주항공 조회 추가 (자동 조회, 국제선 지원 포함)
+#     ※ 조회 버튼 셀렉터 미검증 — 첫 실행 시 확인 필요
 # v3.5.2 (2026-07-03)
 #   - 실행 창 제목표시줄에 버전 자동 표시 (파일명에 버전 안 넣어도 됨)
 # v3.5.1 (2026-07-03)
@@ -126,6 +131,15 @@ KE_URL     = "https://www.koreanair.com/reservation/search"
 LJ_URL     = "https://www.jinair.com/booking/index"
 WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
 TW_URL     = "https://www.twayair.com/app/reservation/searchMemberBooking"
+JJ_URL     = "https://www.jejuair.net/ko/ibe/mypage/viewOnOffReservationList.do"
+
+# 국내/국제선 공항코드 (전역 — 여러 항공사 조회 함수에서 공유)
+AIRPORT_CODES = (
+    r'PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+    r'|CNX|BKK|HKT|NRT|HND|KIX|NGO|CTS|FUK|OKA'
+    r'|DAD|SGN|HAN|CXR|PQC|CEB|KLO|TAG|MNL'
+    r'|TPE|HKG|MFM|SIN|DPS|GUM'
+)
 HEADLESS   = False
 DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
@@ -246,7 +260,7 @@ def load_targets(path, sheet, start_date, end_date):
         kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
         if not all([kor_name, airline, pnr]):
             continue
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공"):
             continue
         if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
             continue
@@ -286,7 +300,7 @@ def save_results(path, sheet, targets):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
         kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "파라타항공", "티웨이항공"):
+        if airline not in ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공"):
             continue
         key = (pnr, airline, kor_name)
         if key in result_map:
@@ -932,6 +946,134 @@ async def check_tw(page, target):
         return "⚠️ 수동확인필요", "[수동확인] 보류됨 — 재확인 필요"
 
 
+async def check_jj(page, target):
+    """
+    제주항공 — 조회 페이지(viewOnOffReservationList.do)에서 입력 후
+    결과 페이지(viewReservationDetail.do)로 이동.
+    ※ 조회 버튼 셀렉터는 텍스트 기반 임시 처리 — 실제 버튼과 다르면 확인 필요
+    """
+    pnr      = target["pnr"]
+    last     = target["last"]
+    first    = target["first"]
+    eng_name = target.get("eng_name", "")
+    dep      = target["dep"]
+    arr      = target["arr"]
+
+    dep_date = parse_dep_date(target["dep_time"])
+    if not dep_date:
+        return "💥 오류", "출발일 파싱 실패"
+
+    intl = is_international(dep, arr)
+
+    if intl and eng_name:
+        parts       = eng_name.split("/")
+        input_last  = parts[0].strip() if len(parts) >= 1 else last
+        input_first = parts[1].strip() if len(parts) >= 2 else first
+    else:
+        input_last  = last
+        input_first = first
+
+    jj_page = await page.context.new_page()
+    try:
+        await jj_page.goto(JJ_URL, wait_until="domcontentloaded", timeout=20000)
+        await jj_page.wait_for_timeout(1500)
+
+        await jj_page.locator("#recordLocatorLabel").fill(pnr)
+        await jj_page.wait_for_timeout(300)
+
+        await jj_page.locator("#psInputLastName_1").fill(input_last)
+        await jj_page.wait_for_timeout(300)
+
+        await jj_page.locator("#psInputFirstName_1").fill(input_first)
+        await jj_page.locator("#psInputFirstName_1").press("Tab")
+        await jj_page.wait_for_timeout(300)
+
+        # 탑승일자 달력 선택
+        await jj_page.click("#boardingDateBtn", timeout=5000)
+        await jj_page.wait_for_selector("#datepicker01", timeout=5000)
+        await jj_page.wait_for_timeout(500)
+
+        day_str = str(dep_date.day)
+        try:
+            date_cell = jj_page.locator(
+                "#datepicker01 span.date", has_text=re.compile(rf'^{day_str}$')
+            )
+            await date_cell.first.click()
+        except Exception:
+            pass
+
+        await jj_page.wait_for_timeout(500)
+
+        # 조회 버튼 — id="searchResvBtn" (입력 검증 통과 전까지 disabled)
+        try:
+            await jj_page.wait_for_selector("#searchResvBtn:not([disabled])", timeout=5000)
+        except Exception:
+            pass
+        await jj_page.click("#searchResvBtn", timeout=5000)
+
+        try:
+            await jj_page.wait_for_selector("text=탑승객 정보", timeout=15000)
+        except Exception:
+            pass
+        await jj_page.wait_for_timeout(2000)
+
+        html_content = await jj_page.inner_text("body")
+
+        if any(kw in html_content for kw in CF_KEYWORDS):
+            return "⏱️ 타임아웃", "보안 확인 필요 → 재실행 필요"
+
+        # 성공 판정: "탑승객 정보" 존재 여부
+        if "탑승객 정보" not in html_content:
+            return "❌ PNR오류", "예약 확인 불가"
+
+        flt_match = re.search(r'7C\d{3,4}', html_content)
+        flt_found = flt_match.group() if flt_match else "편명미확인"
+
+        date_match = re.search(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
+        if date_match:
+            y = date_match.group(1)
+            m = date_match.group(2).zfill(2)
+            d = date_match.group(3).zfill(2)
+            date_found = f"{y}-{m}-{d}"
+        else:
+            date_found = "날짜미확인"
+
+        airports = re.findall(
+            rf'(?<![A-Z0-9])({AIRPORT_CODES})(?![A-Z0-9])',
+            html_content
+        )
+        if len(airports) >= 2:
+            route_found = f"{airports[0]}→{airports[1]}"
+        else:
+            route_found = "구간미확인"
+
+        detail = f"{flt_found} | {date_found} | {route_found}"
+
+        mismatch = []
+        if dep_date and date_found != "날짜미확인":
+            try:
+                site_date = datetime.strptime(date_found, "%Y-%m-%d")
+                if dep_date.date() != site_date.date():
+                    mismatch.append(
+                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
+                    )
+            except Exception:
+                pass
+
+        if mismatch:
+            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        return "✅ 확인완료", detail
+
+    except PWTimeout:
+        return "⏱️ 타임아웃", "재시도 필요"
+    except Exception:
+        logging.error(f"제주항공 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
+        return "💥 오류", "시스템 로그 확인 필요"
+    finally:
+        await jj_page.close()
+
+
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
     airline  = target["airline"]
@@ -943,6 +1085,8 @@ async def run_check(page, target, we_email=""):
         result, detail = await check_ke(page, target)
     elif airline == "진에어":
         result, detail = await check_lj(page, target)
+    elif airline == "제주항공":
+        result, detail = await check_jj(page, target)
     elif airline == "파라타항공":
         result, detail = await check_we(page, target, we_email)
     elif airline == "티웨이항공":
@@ -955,7 +1099,7 @@ async def run_check(page, target, we_email=""):
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
     intl = is_international(target["dep"], target["arr"])
     if (
-        airline in ("에어부산", "대한항공", "진에어")
+        airline in ("에어부산", "대한항공", "진에어", "제주항공")
         and not intl
         and eng_name
         and any(kw in result for kw in ["PNR오류", "예약없음"])
@@ -1026,11 +1170,12 @@ async def main():
     bx_cnt = sum(1 for t in targets if t["airline"] == "에어부산")
     ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
     lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
+    jj_cnt = sum(1 for t in targets if t["airline"] == "제주항공")
     we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
     tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이항공")
 
     print(f"검증 대상: {total}건 ({mode_label})")
-    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
+    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 제주항공: {jj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
