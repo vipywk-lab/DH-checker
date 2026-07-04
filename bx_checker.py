@@ -16,17 +16,22 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.1"
+__version__ = "3.6.3"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 조회버튼 실제 셀렉터 반영"
+LATEST_CHANGELOG = "  - 제주항공 광고 팝업 닫기버튼 정확한 셀렉터로 반영"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.3 (2026-07-04)
+#   - 제주항공 광고 팝업 닫기버튼 셀렉터를 실제 확인된 값(그루비 아이콘 src)으로 교체
+# v3.6.2 (2026-07-04)
+#   - 제주항공 진입 시 뜨는 마케팅 광고 팝업(그루비 등) 자동 닫기 시도 추가
+#     (달력 클릭이 광고에 막히던 문제 대응 — 정확한 버튼 구조 확인되면 추가 보완 예정)
 # v3.6.1 (2026-07-03)
 #   - 제주항공 조회버튼 실제 셀렉터(#searchResvBtn) 반영 + 비활성화 해제 대기 추가
 # v3.6.0 (2026-07-03)
@@ -946,11 +951,44 @@ async def check_tw(page, target):
         return "⚠️ 수동확인필요", "[수동확인] 보류됨 — 재확인 필요"
 
 
+async def _dismiss_ad_popup(p):
+    """
+    사이트 진입 시 뜨는 마케팅 팝업(그루비 등) 자동 닫기 시도.
+    사이트마다 구조가 달라 정확한 셀렉터를 알 수 없으므로 여러 후보를 순서대로 시도.
+    실패해도 조회 자체엔 영향 없게 조용히 넘어감.
+    """
+    candidates = [
+        "img[src*='groobee.io/image/close']",  # 제주항공에서 실제 확인된 그루비 닫기 아이콘
+        "img[alt*='닫기']",
+        "[class*='groobee'] [class*='close']",
+        "[id*='groobee'] [class*='close']",
+        "[class*='popup'] [class*='close']",
+        "[class*='layer'] [class*='close']",
+        "button[class*='close']",
+        "[class*='btn-close']",
+        "text=닫기",
+    ]
+    for selector in candidates:
+        try:
+            el = p.locator(selector).first
+            if await el.is_visible(timeout=1000):
+                await el.click(timeout=1000)
+                await p.wait_for_timeout(300)
+                return
+        except Exception:
+            continue
+    try:
+        await p.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
 async def check_jj(page, target):
     """
     제주항공 — 조회 페이지(viewOnOffReservationList.do)에서 입력 후
     결과 페이지(viewReservationDetail.do)로 이동.
-    ※ 조회 버튼 셀렉터는 텍스트 기반 임시 처리 — 실제 버튼과 다르면 확인 필요
+    ※ 진입 시 마케팅 팝업이 뜰 수 있어 자동 닫기 시도 후 진행.
+    ※ 달력 날짜 선택은 "일(day) 숫자" 텍스트 매칭 방식 — 검증 필요.
     """
     pnr      = target["pnr"]
     last     = target["last"]
@@ -978,6 +1016,9 @@ async def check_jj(page, target):
         await jj_page.goto(JJ_URL, wait_until="domcontentloaded", timeout=20000)
         await jj_page.wait_for_timeout(1500)
 
+        # 진입 시 뜨는 마케팅 팝업(그루비 등)이 폼을 가려 클릭이 막히는 문제 방지
+        await _dismiss_ad_popup(jj_page)
+
         await jj_page.locator("#recordLocatorLabel").fill(pnr)
         await jj_page.wait_for_timeout(300)
 
@@ -992,6 +1033,9 @@ async def check_jj(page, target):
         await jj_page.click("#boardingDateBtn", timeout=5000)
         await jj_page.wait_for_selector("#datepicker01", timeout=5000)
         await jj_page.wait_for_timeout(500)
+
+        # 시차 두고 뜨는 광고 팝업이 달력을 가릴 수 있어 한 번 더 확인
+        await _dismiss_ad_popup(jj_page)
 
         day_str = str(dep_date.day)
         try:
@@ -1293,7 +1337,10 @@ async def main():
                     else:
                         await asyncio.sleep(random.uniform(delay_min, delay_max))
 
-        await browser.close()
+        try:
+            await browser.close()
+        except Exception:
+            pass  # 이미 닫혀있으면 무시
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
