@@ -16,17 +16,22 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.8.1"
+__version__ = "3.8.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 안내 팝업을 처음 보는 사람도 따라할 수 있게 단계별로 상세화"
+LATEST_CHANGELOG = "  - 제주항공: 조회까지 이미 진행됐어도 실패로 오판정하던 문제 수정"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.8.2 (2026-07-04)
+#   - 제주항공: 사람이 조회 버튼까지 이미 눌러서 결과페이지로 넘어간 경우
+#     "달력 날짜 선택 실패"로 잘못 판정하던 문제 수정 (이 경우도 정상 진행)
+#   - 조회 버튼 중복 클릭 방지 (사람이 이미 눌렀으면 자동화가 또 안 누름)
+#   - 팝업 문구에 "조회 버튼은 누르지 마세요" 명확히 추가
 # v3.8.1 (2026-07-04)
 #   - 제주항공 팝업 문구를 ①②③④ 단계별로 상세화 — 배경 설명 없이 처음 보는
 #     팀원도 무엇을 해야 할지 바로 알 수 있게 (어느 창인지, 오류 아님을 명시)
@@ -1057,7 +1062,9 @@ def _prompt_jj_calendar(pnr, kor_name, target_date_display):
             "   (이미 달력이 떠 있는 상태입니다)\n"
             "② 달력에서 위 '출발일' 날짜를 클릭하세요\n"
             "③ '선택' 버튼을 클릭하세요 (달력이 닫힘)\n"
-            "④ 아래 [완료] 버튼을 눌러주세요 → 이후 조회는 자동으로 진행됩니다\n\n"
+            "④ 여기서 멈추고, [조회] 버튼은 누르지 마세요!\n"
+            "⑤ 아래 [완료] 버튼을 눌러주세요 → 조회는 자동으로 진행됩니다\n\n"
+            "(혹시 실수로 조회까지 눌렀어도 그대로 [완료]를 눌러주시면 됩니다)\n"
             "날짜가 헷갈리거나 실수했으면 [건너뛰기]를 눌러주세요."
         ),
         justify="left", padx=20, pady=15
@@ -1138,28 +1145,35 @@ async def check_jj(page, target):
         if choice != "done":
             return "⚠️ 수동확인필요", "[제주달력] 사용자가 건너뜀"
 
-        # 사람이 선택 완료했는지 값 확인 (최대 3초)
+        # 사람이 "완료" 누른 시점 상태 확인 — 두 가지 경우 모두 정상 진행:
+        # (1) 아직 검색 폼에 있고 날짜가 채워짐  (2) 이미 조회까지 눌러서 결과 페이지로 넘어감
         date_selected = False
+        already_searched = False
         try:
-            await jj_page.wait_for_function(
-                "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
-                timeout=3000
+            selectdate_val = await jj_page.evaluate(
+                "() => { const el = document.querySelector('#selectDate'); return el ? el.value : null; }"
             )
-            date_selected = True
+            if selectdate_val:
+                date_selected = True
+            elif selectdate_val is None:
+                # #selectDate 자체가 없다 = 검색 폼을 벗어난 것 (이미 결과 페이지로 이동)
+                already_searched = True
         except Exception:
             pass
 
-        if not date_selected:
+        if not date_selected and not already_searched:
             return "❌ PNR오류", "달력 날짜 선택 실패"
 
         await jj_page.wait_for_timeout(300)
 
-        # 조회 버튼 — id="searchResvBtn" (입력 검증 통과 전까지 disabled)
-        try:
-            await jj_page.wait_for_selector("#searchResvBtn:not([disabled])", timeout=5000)
-        except Exception:
-            pass
-        await jj_page.click("#searchResvBtn", timeout=5000)
+        # 조회 버튼 — 사람이 이미 눌렀으면 중복 클릭하지 않음
+        if not already_searched:
+            # id="searchResvBtn" (입력 검증 통과 전까지 disabled)
+            try:
+                await jj_page.wait_for_selector("#searchResvBtn:not([disabled])", timeout=5000)
+            except Exception:
+                pass
+            await jj_page.click("#searchResvBtn", timeout=5000)
 
         # 조회 성공 시 viewReservationDetail.do로 실제 페이지 이동(navigate)이 발생함
         # 텍스트만 기다리면 이동 중인 중간 상태를 잘못 캡처할 수 있어 URL 이동을 우선 대기
