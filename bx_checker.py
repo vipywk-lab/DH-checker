@@ -16,17 +16,21 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.7"
+__version__ = "3.6.8"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 달력: 월 경계 필러셀 오클릭 방지"
+LATEST_CHANGELOG = "  - 제주항공 달력: 고정 대기시간 대신 실제 선택여부 확인하도록 개선"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.8 (2026-07-04)
+#   - 제주항공 달력: 고정 대기시간 찍어맞추기 대신 #selectDate 값이 실제로
+#     채워졌는지 확인하고, 달력이 완전히 닫힐 때까지 대기하도록 개선
+#   - 날짜 선택 자체가 실패하면 애매한 오류 대신 명확히 "달력 날짜 선택 실패"로 표시
 # v3.6.7 (2026-07-04)
 #   - 제주항공 달력: 월 경계에서 이전/다음달 채우기용 비활성 셀(같은 aria-label 중복)을
 #     잘못 클릭할 수 있던 문제 방지 (:not(.hidden):not(.flatpickr-disabled) 추가)
@@ -1066,18 +1070,38 @@ async def check_jj(page, target):
         # flatpickr 구조: 실제 클릭 요소는 span.flatpickr-day (aria-label="YYYYMMDD")
         # 이전에 쓰던 span.date는 aria-hidden="true"인 화면에 안 보이는 보조 라벨이었음
         target_label = dep_date.strftime("%Y%m%d")
+        date_selected = False
         try:
             date_cell = jj_page.locator(
                 f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']:not(.hidden):not(.flatpickr-disabled)"
             )
             await date_cell.first.click()
-            await jj_page.wait_for_timeout(300)
+
+            # 고정 대기 대신 실제로 값이 채워질 때까지 확인 (최대 3초)
+            try:
+                await jj_page.wait_for_function(
+                    "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
+                    timeout=3000
+                )
+                date_selected = True
+            except Exception:
+                pass
+
             # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
             await jj_page.click("#chooseDepDateBtn", timeout=3000)
+
+            # 달력이 실제로 닫힐 때까지 대기 (다음 단계에서 조회버튼이 계속 disabled인 문제 방지)
+            try:
+                await jj_page.wait_for_selector("#datepicker01", state="hidden", timeout=3000)
+            except Exception:
+                pass
         except Exception:
             pass
 
-        await jj_page.wait_for_timeout(500)
+        if not date_selected:
+            return "❌ PNR오류", "달력 날짜 선택 실패"
+
+        await jj_page.wait_for_timeout(300)
 
         # 조회 버튼 — id="searchResvBtn" (입력 검증 통과 전까지 disabled)
         try:
