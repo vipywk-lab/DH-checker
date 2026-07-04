@@ -16,17 +16,20 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.6"
+__version__ = "3.6.7"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 달력 날짜 클릭 진짜 원인 수정 (안 보이는 요소 클릭하던 버그)"
+LATEST_CHANGELOG = "  - 제주항공 달력: 월 경계 필러셀 오클릭 방지"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.7 (2026-07-04)
+#   - 제주항공 달력: 월 경계에서 이전/다음달 채우기용 비활성 셀(같은 aria-label 중복)을
+#     잘못 클릭할 수 있던 문제 방지 (:not(.hidden):not(.flatpickr-disabled) 추가)
 # v3.6.6 (2026-07-04)
 #   - 제주항공 달력(flatpickr) 실제 원인 수정: aria-hidden="true"인 안 보이는
 #     보조 라벨(span.date)을 클릭하고 있었음 → 실제 클릭요소(span.flatpickr-day,
@@ -1064,7 +1067,9 @@ async def check_jj(page, target):
         # 이전에 쓰던 span.date는 aria-hidden="true"인 화면에 안 보이는 보조 라벨이었음
         target_label = dep_date.strftime("%Y%m%d")
         try:
-            date_cell = jj_page.locator(f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']")
+            date_cell = jj_page.locator(
+                f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']:not(.hidden):not(.flatpickr-disabled)"
+            )
             await date_cell.first.click()
             await jj_page.wait_for_timeout(300)
             # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
