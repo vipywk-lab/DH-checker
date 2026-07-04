@@ -16,17 +16,22 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.7.0"
+__version__ = "3.7.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 진에어/제주항공 날짜 오판정 수정 (예약일을 출발일로 착각하던 문제)"
+LATEST_CHANGELOG = "  - 제주항공 달력 선택을 API 방식으로 전면 교체 + 구간 표시(도시명) 수정"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.7.1 (2026-07-04)
+#   - 제주항공 달력: 클릭 시뮬레이션(사람이 눌러줘야만 반응하던 문제) 대신
+#     flatpickr 공식 JS API(setDate)로 직접 날짜 세팅하도록 전면 교체
+#   - 제주항공 구간: 공항코드 대신 한글 도시명으로 표시하는 사이트 구조 반영
+#     (.boarding__info-title 요소에서 직접 도시명 추출)
 # v3.7.0 (2026-07-04)
 #   - [중요] 진에어·제주항공: "예약일"을 실제 출발일로 착각해서
 #     멀쩡한 예약도 "날짜불일치"로 잘못 뜨던 문제 수정
@@ -1070,24 +1075,24 @@ async def check_jj(page, target):
         # 시차 두고 뜨는 광고 팝업이 달력을 가릴 수 있어 한 번 더 확인
         await _dismiss_ad_popup(jj_page)
 
-        # 달력이 열리자마자 클릭하면 반응 안 하는 경우가 있어, hover로 예열 (클릭은 위험해서 안 함)
-        try:
-            await jj_page.locator("#datepicker01").hover(timeout=1000)
-            await jj_page.wait_for_timeout(300)
-        except Exception:
-            pass
-
-        # flatpickr 구조: 실제 클릭 요소는 span.flatpickr-day (aria-label="YYYYMMDD")
-        # 이전에 쓰던 span.date는 aria-hidden="true"인 화면에 안 보이는 보조 라벨이었음
-        target_label = dep_date.strftime("%Y%m%d")
+        # 클릭 시뮬레이션이 계속 불안정해서(사람이 눌러줘야만 반응) flatpickr 공식 JS API로 직접 세팅
+        # #selectDate에 연결된 flatpickr 인스턴스(._flatpickr)의 setDate()를 직접 호출
+        target_value = dep_date.strftime("%Y-%m-%d")
         date_selected = False
         try:
-            date_cell = jj_page.locator(
-                f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']:not(.hidden):not(.flatpickr-disabled)"
+            await jj_page.evaluate(
+                """(dateStr) => {
+                    const el = document.querySelector('#selectDate');
+                    if (el && el._flatpickr) {
+                        el._flatpickr.setDate(dateStr, true);
+                        return true;
+                    }
+                    return false;
+                }""",
+                target_value
             )
-            await date_cell.first.click()
 
-            # 고정 대기 대신 실제로 값이 채워질 때까지 확인 (최대 3초)
+            # 실제로 값이 채워졌는지 확인 (최대 3초)
             try:
                 await jj_page.wait_for_function(
                     "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
@@ -1097,7 +1102,7 @@ async def check_jj(page, target):
             except Exception:
                 pass
 
-            # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
+            # "선택" 버튼을 눌러야 커스텀 모달이 닫힘 (flatpickr 자체와는 별개의 사이트 UI)
             await jj_page.click("#chooseDepDateBtn", timeout=3000)
 
             # 달력이 실제로 닫힐 때까지 대기 (다음 단계에서 조회버튼이 계속 disabled인 문제 방지)
@@ -1159,14 +1164,25 @@ async def check_jj(page, target):
         else:
             date_found = "날짜미확인"
 
-        airports = re.findall(
-            rf'(?<![A-Z0-9])({AIRPORT_CODES})(?![A-Z0-9])',
-            html_content
-        )
-        if len(airports) >= 2:
-            route_found = f"{airports[0]}→{airports[1]}"
+        # 이 사이트는 공항코드(PQC/ICN) 대신 한글 도시명("푸꾸옥","서울")으로 표시함
+        try:
+            city_titles = await jj_page.locator(".boarding__info-title").all_inner_texts()
+            city_titles = [c.strip() for c in city_titles if c.strip()]
+        except Exception:
+            city_titles = []
+
+        if len(city_titles) >= 2:
+            route_found = f"{city_titles[0]}→{city_titles[1]}"
         else:
-            route_found = "구간미확인"
+            # 혹시 코드로 표시되는 경우 대비한 폴백
+            airports = re.findall(
+                rf'(?<![A-Z0-9])({AIRPORT_CODES})(?![A-Z0-9])',
+                html_content
+            )
+            if len(airports) >= 2:
+                route_found = f"{airports[0]}→{airports[1]}"
+            else:
+                route_found = "구간미확인"
 
         detail = f"{flt_found} | {date_found} | {route_found}"
 
