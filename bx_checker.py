@@ -16,17 +16,21 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.7.1"
+__version__ = "3.7.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 달력 선택을 API 방식으로 전면 교체 + 구간 표시(도시명) 수정"
+LATEST_CHANGELOG = "  - 제주항공 달력: API 방식 되돌리고 클릭 방식 + 대기시간 증가로 재시도"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.7.2 (2026-07-04)
+#   - 제주항공 달력: JS API(setDate) 방식이 사이트 자체 모달 상태와 충돌해서
+#     수동 클릭조차 반응 없어지는 부작용 발생 → 클릭 방식으로 되돌림
+#   - 초기 대기시간 1.2초→3초로 증가 (사이트 자체 JS 초기화 지연 대응 시도)
 # v3.7.1 (2026-07-04)
 #   - 제주항공 달력: 클릭 시뮬레이션(사람이 눌러줘야만 반응하던 문제) 대신
 #     flatpickr 공식 JS API(setDate)로 직접 날짜 세팅하도록 전면 교체
@@ -1070,39 +1074,34 @@ async def check_jj(page, target):
         # 탑승일자 달력 선택
         await jj_page.click("#boardingDateBtn", timeout=5000)
         await jj_page.wait_for_selector("#datepicker01", timeout=5000)
-        await jj_page.wait_for_timeout(1200)
+
+        # 사이트 자체 JS 초기화가 늦게 끝나는 것으로 추정 — 넉넉하게 대기
+        await jj_page.wait_for_timeout(3000)
 
         # 시차 두고 뜨는 광고 팝업이 달력을 가릴 수 있어 한 번 더 확인
         await _dismiss_ad_popup(jj_page)
 
-        # 클릭 시뮬레이션이 계속 불안정해서(사람이 눌러줘야만 반응) flatpickr 공식 JS API로 직접 세팅
-        # #selectDate에 연결된 flatpickr 인스턴스(._flatpickr)의 setDate()를 직접 호출
-        target_value = dep_date.strftime("%Y-%m-%d")
+        # flatpickr 구조: 실제 클릭 요소는 span.flatpickr-day (aria-label="YYYYMMDD")
+        # (JS API로 직접 세팅하는 방식은 사이트 자체 모달 상태와 안 맞아 오히려 더 꼬였음 → 클릭 방식 복귀)
+        target_label = dep_date.strftime("%Y%m%d")
         date_selected = False
         try:
-            await jj_page.evaluate(
-                """(dateStr) => {
-                    const el = document.querySelector('#selectDate');
-                    if (el && el._flatpickr) {
-                        el._flatpickr.setDate(dateStr, true);
-                        return true;
-                    }
-                    return false;
-                }""",
-                target_value
+            date_cell = jj_page.locator(
+                f"#datepicker01 span.flatpickr-day[aria-label='{target_label}']:not(.hidden):not(.flatpickr-disabled)"
             )
+            await date_cell.first.click()
 
-            # 실제로 값이 채워졌는지 확인 (최대 3초)
+            # 실제로 값이 채워질 때까지 확인 (최대 5초)
             try:
                 await jj_page.wait_for_function(
                     "document.querySelector('#selectDate') && document.querySelector('#selectDate').value !== ''",
-                    timeout=3000
+                    timeout=5000
                 )
                 date_selected = True
             except Exception:
                 pass
 
-            # "선택" 버튼을 눌러야 커스텀 모달이 닫힘 (flatpickr 자체와는 별개의 사이트 UI)
+            # "선택" 버튼을 눌러야 달력이 닫히고 값이 반영됨
             await jj_page.click("#chooseDepDateBtn", timeout=3000)
 
             # 달력이 실제로 닫힐 때까지 대기 (다음 단계에서 조회버튼이 계속 disabled인 문제 방지)
