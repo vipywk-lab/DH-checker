@@ -16,17 +16,21 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.8.2"
+__version__ = "3.8.3"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공: 조회까지 이미 진행됐어도 실패로 오판정하던 문제 수정"
+LATEST_CHANGELOG = "  - 제주항공: 날짜만 클릭하면 나머지(선택/조회) 전부 자동 진행되도록 개선"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.8.3 (2026-07-04)
+#   - 제주항공: 사이트 "선택" 버튼 자동 클릭 추가 (사람이 안 눌러도 자동 진행)
+#   - 광고 팝업 재정리를 팝업 완료 직후에도 수행 (뒷사람 조회 실패 방지)
+#   - 안내 문구 단순화: "날짜만 클릭 → [완료]" — 나머지는 다 자동
 # v3.8.2 (2026-07-04)
 #   - 제주항공: 사람이 조회 버튼까지 이미 눌러서 결과페이지로 넘어간 경우
 #     "달력 날짜 선택 실패"로 잘못 판정하던 문제 수정 (이 경우도 정상 진행)
@@ -1060,11 +1064,10 @@ def _prompt_jj_calendar(pnr, kor_name, target_date_display):
             f"  출발일 : {target_date_display}\n\n"
             "① 지금 열려있는 자동화 Chrome 창을 클릭해서 앞으로 가져오세요\n"
             "   (이미 달력이 떠 있는 상태입니다)\n"
-            "② 달력에서 위 '출발일' 날짜를 클릭하세요\n"
-            "③ '선택' 버튼을 클릭하세요 (달력이 닫힘)\n"
-            "④ 여기서 멈추고, [조회] 버튼은 누르지 마세요!\n"
-            "⑤ 아래 [완료] 버튼을 눌러주세요 → 조회는 자동으로 진행됩니다\n\n"
-            "(혹시 실수로 조회까지 눌렀어도 그대로 [완료]를 눌러주시면 됩니다)\n"
+            "② 달력에서 위 '출발일' 날짜만 클릭하세요\n"
+            "③ 아래 [완료] 버튼을 눌러주세요\n"
+            "   → '선택'/'조회' 버튼 클릭 및 나머지는 자동으로 진행됩니다\n\n"
+            "(혹시 실수로 선택/조회까지 눌러도 문제없이 진행됩니다)\n"
             "날짜가 헷갈리거나 실수했으면 [건너뛰기]를 눌러주세요."
         ),
         justify="left", padx=20, pady=15
@@ -1145,8 +1148,20 @@ async def check_jj(page, target):
         if choice != "done":
             return "⚠️ 수동확인필요", "[제주달력] 사용자가 건너뜀"
 
-        # 사람이 "완료" 누른 시점 상태 확인 — 두 가지 경우 모두 정상 진행:
-        # (1) 아직 검색 폼에 있고 날짜가 채워짐  (2) 이미 조회까지 눌러서 결과 페이지로 넘어감
+        # 광고가 다시 떴을 수 있어 한 번 더 정리
+        await _dismiss_ad_popup(jj_page)
+
+        # 사람이 사이트 "선택" 버튼을 안 눌렀을 경우 대비해서 자동화가 눌러줌 (있으면)
+        try:
+            choose_btn = jj_page.locator("#chooseDepDateBtn")
+            if await choose_btn.is_visible(timeout=500):
+                await choose_btn.click(timeout=2000)
+                await jj_page.wait_for_timeout(500)
+        except Exception:
+            pass
+
+        # 상태 확인 — 두 가지 경우 모두 정상 진행:
+        # (1) 검색 폼에서 날짜가 채워짐  (2) 이미 조회까지 눌러서 결과 페이지로 넘어감
         date_selected = False
         already_searched = False
         try:
