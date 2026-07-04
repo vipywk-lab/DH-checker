@@ -16,17 +16,20 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.8"
+__version__ = "3.6.9"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 달력: 고정 대기시간 대신 실제 선택여부 확인하도록 개선"
+LATEST_CHANGELOG = "  - 제주항공 조회결과 페이지 이동을 먼저 기다리도록 개선 (결과화면 놓치던 문제)"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.6.9 (2026-07-04)
+#   - 제주항공: 조회 성공 시 viewReservationDetail.do로 페이지 이동하는 걸
+#     먼저 기다리도록 변경 (텍스트만 보다가 결과화면을 놓치던 문제 대응)
 # v3.6.8 (2026-07-04)
 #   - 제주항공 달력: 고정 대기시간 찍어맞추기 대신 #selectDate 값이 실제로
 #     채워졌는지 확인하고, 달력이 완전히 닫힐 때까지 대기하도록 개선
@@ -1110,11 +1113,20 @@ async def check_jj(page, target):
             pass
         await jj_page.click("#searchResvBtn", timeout=5000)
 
+        # 조회 성공 시 viewReservationDetail.do로 실제 페이지 이동(navigate)이 발생함
+        # 텍스트만 기다리면 이동 중인 중간 상태를 잘못 캡처할 수 있어 URL 이동을 우선 대기
+        # (URL이 안 바뀌는 SPA 방식일 수도 있어 짧게 시도 후 텍스트 대기로 넘어감)
         try:
-            await jj_page.wait_for_selector("text=탑승객 정보", timeout=15000)
+            await jj_page.wait_for_url(re.compile(r"viewReservationDetail"), timeout=8000)
         except Exception:
             pass
-        await jj_page.wait_for_timeout(2000)
+
+        # URL 이동 후에도 렌더링 시간 필요 — "탑승객 정보" 텍스트로 최종 확인
+        try:
+            await jj_page.wait_for_selector("text=탑승객 정보", timeout=10000)
+        except Exception:
+            pass
+        await jj_page.wait_for_timeout(1500)
 
         html_content = await jj_page.inner_text("body")
 
