@@ -16,17 +16,21 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.6.9"
+__version__ = "3.7.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 제주항공 조회결과 페이지 이동을 먼저 기다리도록 개선 (결과화면 놓치던 문제)"
+LATEST_CHANGELOG = "  - 진에어/제주항공 날짜 오판정 수정 (예약일을 출발일로 착각하던 문제)"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
 # ==========================================
 # 체인지로그
+# v3.7.0 (2026-07-04)
+#   - [중요] 진에어·제주항공: "예약일"을 실제 출발일로 착각해서
+#     멀쩡한 예약도 "날짜불일치"로 잘못 뜨던 문제 수정
+#     (페이지에 예약일이 출발일보다 먼저 나오는 구조라 첫 번째 날짜만 보면 안 됐음)
 # v3.6.9 (2026-07-04)
 #   - 제주항공: 조회 성공 시 viewReservationDetail.do로 페이지 이동하는 걸
 #     먼저 기다리도록 변경 (텍스트만 보다가 결과화면을 놓치던 문제 대응)
@@ -718,12 +722,15 @@ async def check_lj(page, target):
         flt_match = re.search(r'LJ\d{3,4}', html_content)
         flt_found = flt_match.group() if flt_match else "편명미확인"
 
-        date_match = re.search(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
-        if date_match:
-            y = date_match.group(1)
-            m = date_match.group(2).zfill(2)
-            d = date_match.group(3).zfill(2)
-            date_found = f"{y}-{m}-{d}"
+        # 페이지에 "예약일 YYYY.MM.DD(요일)"가 실제 출발일보다 먼저 나와서
+        # 첫 매치만 쓰면 예약일을 출발일로 착각함 — 예약일 다음 매치를 사용
+        date_matches = re.findall(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
+        if len(date_matches) >= 2:
+            y, m, d = date_matches[1]
+            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+        elif len(date_matches) == 1:
+            y, m, d = date_matches[0]
+            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
         else:
             date_found = "날짜미확인"
 
@@ -1140,12 +1147,15 @@ async def check_jj(page, target):
         flt_match = re.search(r'7C\d{3,4}', html_content)
         flt_found = flt_match.group() if flt_match else "편명미확인"
 
-        date_match = re.search(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
-        if date_match:
-            y = date_match.group(1)
-            m = date_match.group(2).zfill(2)
-            d = date_match.group(3).zfill(2)
-            date_found = f"{y}-{m}-{d}"
+        # 페이지에 "예약일 YYYY.MM.DD(요일)"가 실제 출발일보다 먼저 나와서
+        # 첫 매치만 쓰면 예약일을 출발일로 착각함 — 예약일 다음 매치를 사용
+        date_matches = re.findall(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
+        if len(date_matches) >= 2:
+            y, m, d = date_matches[1]
+            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+        elif len(date_matches) == 1:
+            y, m, d = date_matches[0]
+            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
         else:
             date_found = "날짜미확인"
 
