@@ -16,19 +16,33 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.8.6"
+__version__ = "3.9.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - 구버전 안내에 실제 NAS 경로/GitHub 링크 반영"
+LATEST_CHANGELOG = "  - [중요] 편명/구간 둘 다 못 읽었는데 확인완료로 잘못 뜨던 문제 수정"
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
                "DDoS protection", "보안 서비스", "악의적인 봇", "Cloudflare"]
+
+
+def _is_reliable_result(flt_found, route_found):
+    """
+    편명·구간을 둘 다 못 읽었으면 실제 예약 정보를 읽은 게 아니라
+    (알려지지 않은 오류 문구의 실패 페이지 등) 실패일 가능성이 높음.
+    실패 키워드 목록에 없다고 무조건 "확인완료"로 넘기지 않기 위한 안전장치.
+    """
+    return not (flt_found == "편명미확인" and route_found == "구간미확인")
 # ==========================================
 # 체인지로그
+# v3.9.0 (2026-07-07) — [중요] 오판정 방지 안전장치 추가
+#   - 에어부산/대한항공/진에어/파라타항공/제주항공 5개 항공사 전부 해당:
+#     실패 문구를 못 찾았다고 해서 무조건 "확인완료"로 반환하지 않도록 수정.
+#     편명·구간을 둘 다 못 읽은 경우(=제대로 된 예약 페이지를 읽은 게 아닐 가능성)
+#     "PNR오류"로 표시해 즉시 확인하도록 변경
 # v3.8.x (2026-07-04) — 제주항공 조회 기능 추가
 #   - PNR/성명 자동입력, 조회결과 자동판정(날짜·구간까지 정확히 확인)
 #   - 달력 날짜 선택만 사람이 클릭(안내 팝업 표시), 나머지는 자동 진행
@@ -464,6 +478,9 @@ async def check_bx(page, target):
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
 
+        if not _is_reliable_result(flt_found, route_found):
+            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
+
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -596,6 +613,9 @@ async def check_ke(page, target):
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
 
+        if not _is_reliable_result(flt_found, route_found):
+            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
+
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -722,6 +742,9 @@ async def check_lj(page, target):
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
 
+        if not _is_reliable_result(flt_found, route_found):
+            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
+
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -822,6 +845,9 @@ async def check_we(page, target, we_email):
 
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        if not _is_reliable_result(flt_found, route_found):
+            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
         return "✅ 확인완료", detail
 
@@ -1209,6 +1235,9 @@ async def check_jj(page, target):
 
         if mismatch:
             return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+        if not _is_reliable_result(flt_found, route_found):
+            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
         return "✅ 확인완료", detail
 
