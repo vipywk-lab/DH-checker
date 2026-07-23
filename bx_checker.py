@@ -16,13 +16,17 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.9.0"
+__version__ = "3.9.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
-LATEST_CHANGELOG = "  - [중요] 편명/구간 둘 다 못 읽었는데 확인완료로 잘못 뜨던 문제 수정"
+LATEST_CHANGELOG = (
+    "  - 조회 중 문제가 생겨도 여기까지의 결과는 엑셀에 저장되도록 개선\n"
+    "  - 제주항공 재조회 시 프로그램이 멈추던 문제 수정\n"
+    "  - PNR오류 건수가 오류 건수에 중복으로 세지던 문제 수정"
+)
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
 CF_KEYWORDS = ["보안 확인 수행 중", "사람인지 확인하십시오", "Checking your browser",
@@ -38,6 +42,18 @@ def _is_reliable_result(flt_found, route_found):
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
 # ==========================================
 # 체인지로그
+# v3.9.2 (2026-07-24) — 전체 재검토로 발견한 버그 수정
+#   - 조회 도중 예외가 나면 프로그램이 통째로 죽고 그때까지의 결과가
+#     하나도 저장되지 않던 문제 수정 (이제 항상 엑셀 저장 + 미조회 건 표시)
+#   - 제주항공 재조회(영문/타임아웃) 분기가 빠져 있어 프로그램이 멈추던 문제 수정
+#   - 대상 0건일 때 오류로 종료되던 문제 수정
+#   - PNR오류가 오류 건수에 중복 집계되던 문제 수정
+# v3.9.1 (2026-07-24) — [매우 중요] PNR 오판정 버그 수정
+#   - 에어부산/대한항공: 조회마다 같은 브라우저 탭을 재사용하고 있었는데,
+#     잘못된 PNR 조회가 실패해도 화면이 안 바뀌면 직전 사람의 결과 화면이
+#     그대로 남아있어 그걸 "확인완료"로 잘못 읽는 문제가 있었음
+#     → 조회마다 새 탭 사용 + 조회한 PNR이 실제 결과 화면에 있는지 확인하는
+#       이중 안전장치 추가 (파라타항공에도 PNR 검증 추가)
 # v3.9.0 (2026-07-07) — [중요] 오판정 방지 안전장치 추가
 #   - 에어부산/대한항공/진에어/파라타항공/제주항공 5개 항공사 전부 해당:
 #     실패 문구를 못 찾았다고 해서 무조건 "확인완료"로 반환하지 않도록 수정.
@@ -323,7 +339,7 @@ def save_results(path, sheet, targets):
     error_count = 0
     for t in targets:
         res = str(t["result"])
-        if any(kw in res for kw in ["불일치", "예약없음", "PNR오류", "오류", "타임아웃", "수동확인필요"]):
+        if any(kw in res for kw in ["불일치", "예약없음", "PNR오류", "오류", "타임아웃", "수동확인필요", "미조회"]):
             ws_summary.append([
                 t["kor_name"],
                 t["airline"],
@@ -376,13 +392,16 @@ async def check_bx(page, target):
     else:
         last  = target["last"]
         first = target["first"]
-    #print(f"  → [BX 디버그] PNR:{pnr} | 국제선:{intl} | 성:{last} | 이름:{first}")
+
+    # 조회마다 새 탭 사용 — 이전 사람의 결과 화면이 남아있는 상태에서
+    # 이번 조회가 실패하면 그 잔류 화면을 잘못 읽어버리는 문제 방지
+    bx_page = await page.context.new_page()
     try:
-        await page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(1500)
+        await bx_page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
+        await bx_page.wait_for_timeout(1500)
 
         # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
-        body_check = await page.inner_text("body")
+        body_check = await bx_page.inner_text("body")
         if any(kw in body_check for kw in CF_KEYWORDS):
             print(f"\n{'='*50}")
             print(f"  ⚠️  [에어부산] 클라우드플레어 보안 확인이 필요합니다!")
@@ -391,44 +410,48 @@ async def check_bx(page, target):
             print(f"{'='*50}")
             await asyncio.get_event_loop().run_in_executor(None, input, "  [확인 후 엔터] ")
             # 통과됐는지 재확인
-            body_check2 = await page.inner_text("body")
+            body_check2 = await bx_page.inner_text("body")
             if any(kw in body_check2 for kw in CF_KEYWORDS):
                 return "⏱️ 타임아웃", "클라우드플레어 차단 미해제 → 재실행 필요"
 
-        await page.click("text=예약번호로 조회", timeout=5000)
-        await page.wait_for_timeout(800)
+        await bx_page.click("text=예약번호로 조회", timeout=5000)
+        await bx_page.wait_for_timeout(800)
 
-        await page.locator("input[placeholder*='예약번호']").first.fill(pnr)
-        await page.wait_for_timeout(300)
-        await page.locator("input[placeholder='성']").first.fill(last)
-        await page.wait_for_timeout(300)
-        await page.locator("input[placeholder='이름']").first.fill(first)
-        await page.wait_for_timeout(300)
+        await bx_page.locator("input[placeholder*='예약번호']").first.fill(pnr)
+        await bx_page.wait_for_timeout(300)
+        await bx_page.locator("input[placeholder='성']").first.fill(last)
+        await bx_page.wait_for_timeout(300)
+        await bx_page.locator("input[placeholder='이름']").first.fill(first)
+        await bx_page.wait_for_timeout(300)
 
-        await page.evaluate("document.querySelector('.buttonOfflineCheckin').click()")
-        await page.wait_for_timeout(2000)
+        await bx_page.evaluate("document.querySelector('.buttonOfflineCheckin').click()")
+        await bx_page.wait_for_timeout(2000)
 
-        body_text = await page.inner_text("body")
+        body_text = await bx_page.inner_text("body")
         if "해당 예약번호가 확인되지 않습니다" in body_text:
             try:
-                await page.click("button:has-text('확인')", timeout=2000)
+                await bx_page.click("button:has-text('확인')", timeout=2000)
             except:
                 pass
             return "❌ PNR오류", "해당 예약번호 확인 불가"
 
         try:
-            await page.wait_for_selector("text=항공권 구매완료", timeout=10000)
+            await bx_page.wait_for_selector("text=항공권 구매완료", timeout=10000)
         except:
             pass
-        await page.wait_for_timeout(1000)
+        await bx_page.wait_for_timeout(1000)
 
-        html_content = await page.inner_text("body")
+        html_content = await bx_page.inner_text("body")
 
         # 결과 파싱 전 클라우드플레어 재체크
         if any(kw in html_content for kw in CF_KEYWORDS):
             return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
         if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "일치하는 예약"]):
             return "❌ 예약없음", "조회결과 없음"
+
+        # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
+        if pnr.upper() not in html_content.upper():
+            return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
 
         flt_match   = re.search(r'BX\s*\d{3,4}', html_content)
         date_match  = re.search(r'(\d{4}-\d{2}-\d{2})', html_content)
@@ -488,6 +511,8 @@ async def check_bx(page, target):
     except Exception as e:
         logging.error(f"에어부산 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
+    finally:
+        await bx_page.close()
 
 
 async def check_ke(page, target):
@@ -510,27 +535,28 @@ async def check_ke(page, target):
     if not dep_date:
         return "💥 오류", "출발일 파싱 실패"
 
+    ke_page = await page.context.new_page()
     try:
-        await page.goto(KE_URL, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(2000)
+        await ke_page.goto(KE_URL, wait_until="domcontentloaded", timeout=20000)
+        await ke_page.wait_for_timeout(2000)
 
         try:
-            await page.click("button:has-text('동의합니다')", timeout=3000)
-            await page.wait_for_timeout(500)
+            await ke_page.click("button:has-text('동의합니다')", timeout=3000)
+            await ke_page.wait_for_timeout(500)
         except:
             pass
 
-        await page.locator("input[maxlength='13']").first.fill(pnr)
-        await page.wait_for_timeout(300)
+        await ke_page.locator("input[maxlength='13']").first.fill(pnr)
+        await ke_page.wait_for_timeout(300)
 
-        await page.click("button[data-dialog-id='#dialog-datepicker1']", timeout=5000)
-        await page.wait_for_timeout(1500)
+        await ke_page.click("button[data-dialog-id='#dialog-datepicker1']", timeout=5000)
+        await ke_page.wait_for_timeout(1500)
 
         dep_day   = str(dep_date.day)
         dep_month = dep_date.month
         dep_year  = dep_date.year
 
-        await page.evaluate(f"""
+        await ke_page.evaluate(f"""
             (function() {{
                 var tds = document.querySelectorAll('td.datepicker__td.-available[role="button"]');
                 for (var td of tds) {{
@@ -552,25 +578,29 @@ async def check_ke(page, target):
                 }}
             }})();
         """)
-        await page.wait_for_timeout(800)
+        await ke_page.wait_for_timeout(800)
 
-        await page.locator("input[autocomplete='family-name']").first.fill(last)
-        await page.wait_for_timeout(300)
-        await page.locator("input[autocomplete='given-name']").first.fill(first)
-        await page.wait_for_timeout(300)
+        await ke_page.locator("input[autocomplete='family-name']").first.fill(last)
+        await ke_page.wait_for_timeout(300)
+        await ke_page.locator("input[autocomplete='given-name']").first.fill(first)
+        await ke_page.wait_for_timeout(300)
 
-        await page.click("button:has-text('조회')", timeout=5000)
+        await ke_page.click("button:has-text('조회')", timeout=5000)
 
         try:
-            await page.wait_for_selector(".journey-info__date", timeout=20000)
+            await ke_page.wait_for_selector(".journey-info__date", timeout=20000)
         except:
             pass
-        await page.wait_for_timeout(2000)
+        await ke_page.wait_for_timeout(2000)
 
-        html_content = await page.inner_text("body")
+        html_content = await ke_page.inner_text("body")
 
         if any(kw in html_content for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
             return "❌ PNR오류", "예약 확인 불가"
+
+        # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
+        if pnr.upper() not in html_content.upper():
+            return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
 
         flt_match = re.search(r'KE\s*\d{3,4}', html_content)
         flt_found = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
@@ -623,6 +653,8 @@ async def check_ke(page, target):
     except Exception as e:
         logging.error(f"대한항공 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
+    finally:
+        await ke_page.close()
 
 
 async def check_lj(page, target):
@@ -807,6 +839,10 @@ async def check_we(page, target, we_email):
             if any(kw in html_content for kw in ["일치하는 예약", "확인되지 않", "조회 결과가 없", "예약 내역이 없"]):
                 return "❌ PNR오류", "예약 확인 불가"
             return "💥 오류", "결과 페이지 이동 실패"
+
+        # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
+        if pnr.upper() not in html_content.upper():
+            return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
 
         # 편명 파싱 (WE208 형태)
         flt_match = re.search(r'WE\s*\d{3,4}', html_content)
@@ -1289,12 +1325,15 @@ async def run_check(page, target, we_email=""):
         # check_* 함수 내 intl=False → 한글 사용이 되므로
         # last/first만 덮어쓴 tmp를 넘기면 영문으로 입력됨
         await asyncio.sleep(1)
+        r2, d2 = result, detail   # 분기 누락 시 NameError 방지
         if airline == "에어부산":
             r2, d2 = await check_bx(page, tmp)
         elif airline == "대한항공":
             r2, d2 = await check_ke(page, tmp)
         elif airline == "진에어":
             r2, d2 = await check_lj(page, tmp)
+        elif airline == "제주항공":
+            r2, d2 = await check_jj(page, tmp)
         if "확인완료" in r2 or "불일치" in r2:
             result = r2
             detail = "[영문재시도] " + d2
@@ -1308,6 +1347,8 @@ async def run_check(page, target, we_email=""):
             result, detail = await check_ke(page, target)
         elif airline == "진에어":
             result, detail = await check_lj(page, target)
+        elif airline == "제주항공":
+            result, detail = await check_jj(page, target)
         elif airline == "파라타항공":
             result, detail = await check_we(page, target, we_email)
         if "확인완료" in result or "불일치" in result:
@@ -1339,7 +1380,7 @@ async def main():
     total   = len(targets)
 
     if total == 0:
-        print(f"오늘부터 {CHECK_DAYS}일 이내 검증 대상이 없습니다.")
+        print(f"검증 대상이 없습니다. ({mode_label})")
         input("엔터 누르면 종료...")
         return
 
@@ -1455,7 +1496,23 @@ async def main():
                 target["detail"] = detail
                 print(f"[캐시] {result}  {detail}")
             else:
-                result, detail = await run_check(page, target, we_email)
+                # 예상 못한 오류(브라우저 강제종료 등)로 전체가 중단되지 않도록 보호
+                # → 여기까지 조회한 결과는 반드시 엑셀에 저장됨
+                try:
+                    result, detail = await run_check(page, target, we_email)
+                except Exception as exc:
+                    logging.error(f"조회 중 예외 | {airline} | PNR: {pnr}", exc_info=True)
+                    result, detail = "💥 오류", "조회 중 오류 발생 (로그 확인)"
+                    if "closed" in str(exc).lower():
+                        target["result"] = result
+                        target["detail"] = detail
+                        print(f"{result}  {detail}")
+                        print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
+                        print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
+                        for rest in targets[i:]:
+                            rest["result"] = "⬜ 미조회"
+                            rest["detail"] = "브라우저 종료로 미처리"
+                        break
                 target["result"] = result
                 target["detail"] = detail
                 # 성공한 결과만 캐시에 저장
@@ -1481,7 +1538,11 @@ async def main():
     no_rsv    = sum(1 for t in targets if t["result"] and "예약없음"     in str(t["result"]))
     pnr_err   = sum(1 for t in targets if t["result"] and "PNR오류"     in str(t["result"]))
     manual    = sum(1 for t in targets if t["result"] and "수동확인필요" in str(t["result"]))
-    error     = sum(1 for t in targets if t["result"] and ("오류" in str(t["result"]) or "타임아웃" in str(t["result"])))
+    # "오류"는 "PNR오류"의 부분문자열이라 그대로 세면 중복 집계됨 → PNR오류는 제외
+    error     = sum(1 for t in targets if t["result"] and
+                    (("오류" in str(t["result"]) and "PNR오류" not in str(t["result"]))
+                     or "타임아웃" in str(t["result"])))
+    skipped   = sum(1 for t in targets if t["result"] and "미조회" in str(t["result"]))
 
     print(f"\n{'='*50}")
     print(f"✅ 확인완료      : {confirmed}건")
@@ -1490,6 +1551,8 @@ async def main():
     print(f"❌ PNR오류       : {pnr_err}건  ← 즉시 확인!")
     print(f"⚠️  수동확인필요  : {manual}건  ← 파라타항공 직접 조회 필요!")
     print(f"💥 오류/재시도   : {error}건")
+    if skipped:
+        print(f"⬜ 미조회        : {skipped}건  ← 중단되어 조회 못함, 재실행 필요!")
     input("\n엔터 누르면 종료...")
 
 
