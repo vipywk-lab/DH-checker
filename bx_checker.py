@@ -16,16 +16,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.9.2"
+__version__ = "3.9.3"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 조회 중 문제가 생겨도 여기까지의 결과는 엑셀에 저장되도록 개선\n"
-    "  - 제주항공 재조회 시 프로그램이 멈추던 문제 수정\n"
-    "  - PNR오류 건수가 오류 건수에 중복으로 세지던 문제 수정"
+    "  - 이름이 비어있거나 형식이 특이한 경우에도 멈추지 않도록 보강\n"
+    "  - 결과가 엑셀에 기록 안 된 건이 있으면 안내하도록 개선"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -42,6 +41,11 @@ def _is_reliable_result(flt_found, route_found):
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
 # ==========================================
 # 체인지로그
+# v3.9.3 (2026-07-24) — 안정성 보강 (전체 재검토)
+#   - 이름 칸이 비었거나 알파벳만 있는 경우 IndexError로 그 건이 오류나던 문제 방어
+#   - 조회 결과가 엑셀 행과 매칭 안 되면(이름/PNR 불일치) 조용히 빈칸으로 남던 것을
+#     콘솔에 매칭 실패 건을 안내하도록 개선
+#   - GitHub 파일에서 버전 정보를 못 찾을 때 안내 출력 (버전체크 무력화 방지)
 # v3.9.2 (2026-07-24) — 전체 재검토로 발견한 버그 수정
 #   - 조회 도중 예외가 나면 프로그램이 통째로 죽고 그때까지의 결과가
 #     하나도 저장되지 않던 문제 수정 (이제 항상 엑셀 저장 + 미조회 건 표시)
@@ -83,8 +87,10 @@ def check_for_update():
     import urllib.request
     try:
         with urllib.request.urlopen(VERSION_URL, timeout=5) as resp:
+            found_version = False
             for line in resp.read().decode("utf-8").splitlines():
                 if line.startswith("__version__"):
+                    found_version = True
                     latest = line.split("=")[1].strip().strip('"').strip("'")
 
                     def _ver(v):
@@ -105,6 +111,11 @@ def check_for_update():
                     else:
                         print(f"✅ 최신 버전입니다 (v{__version__})")
                     return
+            # 파일은 받았으나 __version__ 줄을 못 찾은 경우 (포맷 변경 등)
+            if not found_version:
+                print("⚠️  버전 정보를 확인하지 못했습니다 (버전 체크 건너뜀)\n")
+    except SystemExit:
+        raise
     except Exception:
         print("⚠️  버전 확인 실패 (네트워크 연결 없음 — 무시하고 계속 진행)\n")
 
@@ -227,8 +238,12 @@ def get_check_mode():
 def split_korean_name(name):
     name = name.strip()
     # 동명이인 구분자 제거: 이경수A → 이경수, 박지연B → 박지연
-    name = re.sub(r'[A-Za-z]+$', '', name).strip()
-    return name[0], name[1:]
+    stripped = re.sub(r'[A-Za-z]+$', '', name).strip()
+    # 접미사 제거 후 비었으면(알파벳만 있거나 빈 값) 원본 사용, 그래도 비면 빈 문자열 반환
+    base = stripped if stripped else name
+    if not base:
+        return "", ""
+    return base[0], base[1:]
 
 
 def parse_dep_date(dep_time_str):
@@ -315,6 +330,7 @@ def save_results(path, sheet, targets):
         key = (t["pnr"], t["airline"], t["kor_name"])
         result_map[key] = (t["result"], t["detail"])
 
+    matched_keys = set()
     for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
         airline  = row[1].value
         pnr      = str(row[2].value).strip().upper() if row[2].value else ""
@@ -326,6 +342,15 @@ def save_results(path, sheet, targets):
             result, detail = result_map[key]
             ws.cell(row_idx, RESULT_COL).value = result
             ws.cell(row_idx, DETAIL_COL).value = detail
+            matched_keys.add(key)
+
+    # 조회는 했으나 엑셀 행과 매칭 안 된 건 경고 (이름/PNR이 조회 중 미묘하게 달라진 경우)
+    unmatched = [t for t in targets if (t["pnr"], t["airline"], t["kor_name"]) not in matched_keys]
+    if unmatched:
+        print(f"\n⚠️  결과 {len(unmatched)}건이 엑셀 행과 매칭되지 않아 기록 못 함:")
+        for t in unmatched:
+            print(f"     - {t['kor_name']} | {t['airline']} | {t['pnr']}")
+        print("   (엑셀 원본의 이름/PNR과 조회 데이터가 다른지 확인 필요)")
 
     # ── 확인필요 요약 시트 생성 ──
     summary_name = "확인필요_요약"
