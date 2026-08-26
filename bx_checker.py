@@ -16,15 +16,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.9.3"
+__version__ = "3.9.4"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 이름이 비어있거나 형식이 특이한 경우에도 멈추지 않도록 보강\n"
-    "  - 결과가 엑셀에 기록 안 된 건이 있으면 안내하도록 개선"
+    "  - 지금 어떤 파일을 조회하는지 화면에 표시 (엉뚱한 파일 선택 방지)\n"
+    "  - 대상이 0건일 때 원인 확인 안내 추가"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -41,6 +41,10 @@ def _is_reliable_result(flt_found, route_found):
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
 # ==========================================
 # 체인지로그
+# v3.9.4 (2026-08-26) — 파일 선택 관련 안내 개선
+#   - 조회 시작 시 실제로 읽는 엑셀 파일의 전체 경로를 콘솔에 표시
+#     (화면에서 편집한 파일과 다른 파일을 선택해 "대상 0건"이 뜨던 혼란 방지)
+#   - 대상 0건일 때 원인 체크리스트(파일 확인/저장 여부/조회 범위) 안내 추가
 # v3.9.3 (2026-07-24) — 안정성 보강 (전체 재검토)
 #   - 이름 칸이 비었거나 알파벳만 있는 경우 IndexError로 그 건이 오류나던 문제 방어
 #   - 조회 결과가 엑셀 행과 매칭 안 되면(이름/PNR 불일치) 조용히 빈칸으로 남던 것을
@@ -1404,9 +1408,17 @@ async def main():
     targets = load_targets(EXCEL_PATH, SHEET_NAME, start_date, end_date)
     total   = len(targets)
 
+    print(f"📂 선택한 파일: {EXCEL_PATH}")
+    print(f"   시트: {SHEET_NAME}\n")
+
     if total == 0:
         print(f"검증 대상이 없습니다. ({mode_label})")
-        input("엔터 누르면 종료...")
+        print("\n⚠️  데이터가 분명히 있는데 0건이면 아래를 확인하세요:")
+        print("   1) 위에 표시된 '선택한 파일'이 실제로 데이터를 넣은 그 파일이 맞나요?")
+        print("      (같은 이름의 다른 파일/예전 파일을 골랐을 수 있습니다)")
+        print("   2) 엑셀에서 데이터 입력 후 저장(Ctrl+S)했나요?")
+        print(f"   3) 조회 범위({mode_label})에 실제 출발일이 포함되나요?")
+        input("\n엔터 누르면 종료...")
         return
 
     bx_cnt = sum(1 for t in targets if t["airline"] == "에어부산")
