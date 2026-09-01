@@ -16,15 +16,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.9.4"
+__version__ = "3.10.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 지금 어떤 파일을 조회하는지 화면에 표시 (엉뚱한 파일 선택 방지)\n"
-    "  - 대상이 0건일 때 원인 확인 안내 추가"
+    "  - 이어서 조회 기능 추가 — 중간에 멈춰도 처음부터 다시 안 해도 됩니다\n"
+    "    (이미 확인완료된 건은 건너뛰고, 오류·불일치 건만 다시 조회)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -41,6 +41,11 @@ def _is_reliable_result(flt_found, route_found):
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
 # ==========================================
 # 체인지로그
+# v3.10.0 (2026-08-26) — 이어서 조회 기능 추가
+#   - 실행 시 이미 '확인완료'된 건이 있으면 건너뛸지 묻는 팝업 표시
+#     (한 달치 400건 규모는 1시간 가까이 걸려, 중단 시 처음부터 다시 하던 문제 해소)
+#   - 오류·불일치·PNR오류·미조회 건은 건너뛰지 않고 항상 다시 조회
+#   - 건너뛴 건의 기존 결과는 그대로 유지되고 요약 시트에도 정상 반영됨
 # v3.9.4 (2026-08-26) — 파일 선택 관련 안내 개선
 #   - 조회 시작 시 실제로 읽는 엑셀 파일의 전체 경로를 콘솔에 표시
 #     (화면에서 편집한 파일과 다른 파일을 선택해 "대상 0건"이 뜨던 혼란 방지)
@@ -181,6 +186,47 @@ DELAY_MAX  = 2.0
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
 
 
+def ask_resume(done_count, total_count):
+    """
+    이미 '확인완료'된 건이 있으면 건너뛸지 묻는 팝업.
+    반환값: True(건너뛰기) / False(전체 다시 조회)
+    """
+    result = [None]
+    popup = tk.Toplevel(root)
+    popup.title("이어서 조회")
+    popup.resizable(False, False)
+    popup.attributes("-topmost", True)
+    popup.grab_set()
+
+    tk.Label(
+        popup,
+        text=(
+            f"이미 조회가 끝난 건이 {done_count}건 있습니다.\n"
+            f"(전체 {total_count}건 중)\n\n"
+            "건너뛰고 나머지만 조회하면 시간을 크게 줄일 수 있습니다.\n"
+            "※ 오류·불일치·미조회 건은 건너뛰지 않고 다시 조회합니다.\n\n"
+            "어떻게 할까요?"
+        ),
+        justify="left", padx=20, pady=15
+    ).pack()
+
+    btn_frame = tk.Frame(popup)
+    btn_frame.pack(pady=(0, 15))
+
+    tk.Button(
+        btn_frame, text=f"  이어서 조회 ({total_count - done_count}건)  ", width=22,
+        command=lambda: [result.__setitem__(0, True), popup.destroy()]
+    ).pack(side="left", padx=6)
+    tk.Button(
+        btn_frame, text=f"  처음부터 다시 ({total_count}건)  ", width=22,
+        command=lambda: [result.__setitem__(0, False), popup.destroy()]
+    ).pack(side="left", padx=6)
+
+    popup.wait_window()
+    # 팝업을 그냥 닫으면 안전하게 '이어서 조회'로 처리
+    return True if result[0] is None else result[0]
+
+
 def get_check_mode():
     """실행 시 조회 범위 선택 팝업 — 1:5일 / 2:이번달말 / 3:다음달"""
     import calendar
@@ -295,7 +341,9 @@ def load_targets(path, sheet, start_date, end_date):
     ws = wb[sheet]
     targets = []
     for row in ws.iter_rows(min_row=2, values_only=True):
-        kor_name, airline, pnr, dep, arr, dep_time, eng_name = (list(row) + [None]*7)[:7]
+        vals = (list(row) + [None]*9)[:9]
+        kor_name, airline, pnr, dep, arr, dep_time, eng_name = vals[:7]
+        prev_result, prev_detail = vals[7], vals[8]
         if not all([kor_name, airline, pnr]):
             continue
         if airline not in ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공"):
@@ -317,6 +365,8 @@ def load_targets(path, sheet, start_date, end_date):
             "dep_time": str(dep_time or ""),
             "result"  : None,
             "detail"  : None,
+            "prev_result": str(prev_result) if prev_result else "",
+            "prev_detail": str(prev_detail) if prev_detail else "",
         })
     return targets
 
@@ -1421,17 +1471,37 @@ async def main():
         input("\n엔터 누르면 종료...")
         return
 
-    bx_cnt = sum(1 for t in targets if t["airline"] == "에어부산")
-    ke_cnt = sum(1 for t in targets if t["airline"] == "대한항공")
-    lj_cnt = sum(1 for t in targets if t["airline"] == "진에어")
-    jj_cnt = sum(1 for t in targets if t["airline"] == "제주항공")
-    we_cnt = sum(1 for t in targets if t["airline"] == "파라타항공")
-    tw_cnt = sum(1 for t in targets if t["airline"] == "티웨이항공")
+    # ── 이미 조회 완료된 건이 있으면 이어서 할지 확인 ──
+    done_targets = [t for t in targets if "확인완료" in t["prev_result"]]
+    if done_targets:
+        if ask_resume(len(done_targets), total):
+            for t in done_targets:
+                t["result"] = t["prev_result"]
+                t["detail"] = t["prev_detail"]
+                t["skipped"] = True
+            print(f"⏭  이미 완료된 {len(done_targets)}건은 건너뜁니다. "
+                  f"(남은 조회: {total - len(done_targets)}건)\n")
 
-    print(f"검증 대상: {total}건 ({mode_label})")
+    pending = [t for t in targets if not t.get("skipped")]
+
+    bx_cnt = sum(1 for t in pending if t["airline"] == "에어부산")
+    ke_cnt = sum(1 for t in pending if t["airline"] == "대한항공")
+    lj_cnt = sum(1 for t in pending if t["airline"] == "진에어")
+    jj_cnt = sum(1 for t in pending if t["airline"] == "제주항공")
+    we_cnt = sum(1 for t in pending if t["airline"] == "파라타항공")
+    tw_cnt = sum(1 for t in pending if t["airline"] == "티웨이항공")
+
+    print(f"검증 대상: {len(pending)}건 ({mode_label})")
     print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 제주항공: {jj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
+
+    # 건너뛴 것만 있고 조회할 게 없으면 바로 저장하고 종료
+    if not pending:
+        print("모두 이미 조회 완료된 상태입니다. 결과만 다시 저장합니다.\n")
+        save_results(EXCEL_PATH, SHEET_NAME, targets)
+        input("\n엔터 누르면 종료...")
+        return
 
     # 파라타항공 건수 있으면 이메일 입력 팝업
     we_email = ""
@@ -1521,10 +1591,11 @@ async def main():
 
         pnr_cache = {}
 
-        for i, target in enumerate(targets, 1):
+        pending_total = len(pending)
+        for i, target in enumerate(pending, 1):
             airline = target["airline"]
             pnr     = target["pnr"]
-            print(f"[{i:02d}/{total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
+            print(f"[{i:02d}/{pending_total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
 
             cache_key = (pnr, airline)
             if cache_key in pnr_cache:
@@ -1546,7 +1617,7 @@ async def main():
                         print(f"{result}  {detail}")
                         print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
                         print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
-                        for rest in targets[i:]:
+                        for rest in pending[i:]:
                             rest["result"] = "⬜ 미조회"
                             rest["detail"] = "브라우저 종료로 미처리"
                         break
@@ -1556,7 +1627,7 @@ async def main():
                 if "확인완료" in result:
                     pnr_cache[cache_key] = (result, detail)
                 print(f"{result}  {detail}")
-                if i < total:
+                if i < pending_total:
                     # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
                     if target["airline"] == "에어부산":
                         await asyncio.sleep(random.uniform(5.0, 10.0))
