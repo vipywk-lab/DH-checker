@@ -16,15 +16,14 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.10.1"
+__version__ = "3.10.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - [중요] 같은 예약번호라도 그 사람이 실제 명단에 있는지 확인 후 넘어가도록 수정\n"
-    "    (예전에는 이름 확인 없이 확인완료로 처리되던 경우가 있었습니다)"
+    "  - 대한항공 조회 시 뜨는 쿠키 확인 창을 자동으로 넘기도록 수정"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -80,6 +79,8 @@ def _name_in_page(target, page_text):
     return False
 # ==========================================
 # 체인지로그
+# v3.10.2 (2026-09-02) — 대한항공 쿠키 확인창 자동 처리
+#   - 대한항공 조회 페이지에서 뜨는 "모든 쿠키 허용" 확인창을 자동으로 닫도록 수정
 # v3.10.1 (2026-08-26) — [중요] 캐시 오판정 수정 (사용자 리포트)
 #   - 같은 예약번호(PNR)면 이전 결과를 그대로 재사용하면서 그 사람이 실제로
 #     해당 예약 명단에 있는지는 확인하지 않아, 엉뚱한 사람도 '확인완료'로
@@ -668,6 +669,12 @@ async def check_ke(page, target):
 
         try:
             await ke_page.click("button:has-text('동의합니다')", timeout=3000)
+            await ke_page.wait_for_timeout(500)
+        except:
+            pass
+
+        try:
+            await ke_page.click("button.-confirm:has-text('모든 쿠키 허용')", timeout=3000)
             await ke_page.wait_for_timeout(500)
         except:
             pass
