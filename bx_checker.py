@@ -16,15 +16,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.10.0"
+__version__ = "3.10.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 이어서 조회 기능 추가 — 중간에 멈춰도 처음부터 다시 안 해도 됩니다\n"
-    "    (이미 확인완료된 건은 건너뛰고, 오류·불일치 건만 다시 조회)"
+    "  - [중요] 같은 예약번호라도 그 사람이 실제 명단에 있는지 확인 후 넘어가도록 수정\n"
+    "    (예전에는 이름 확인 없이 확인완료로 처리되던 경우가 있었습니다)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -39,8 +39,53 @@ def _is_reliable_result(flt_found, route_found):
     실패 키워드 목록에 없다고 무조건 "확인완료"로 넘기지 않기 위한 안전장치.
     """
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
+
+
+# 조회 성공 시 결과 페이지 텍스트를 보관 — 같은 PNR의 다른 탑승객이
+# 실제로 그 예약에 포함돼 있는지 확인하는 데 사용
+_page_cache = {}
+
+
+def _remember_page(pnr, airline, page_text):
+    """조회 성공한 결과 페이지 텍스트를 보관 (같은 PNR 동승자 검증용)"""
+    try:
+        _page_cache[(pnr, airline)] = str(page_text)
+    except Exception:
+        pass
+
+
+def _name_in_page(target, page_text):
+    """
+    해당 탑승객이 결과 페이지에 실제로 있는지 확인.
+    한글명 / 영문명(성·이름 각각) 어느 쪽이든 발견되면 True.
+    ※ 사이트가 이름을 가리는 경우(홍*동 등)엔 못 찾을 수 있으며,
+      그때는 캐시를 쓰지 않고 개별 조회하므로 안전하게 동작함.
+    """
+    if not page_text:
+        return False
+    norm = re.sub(r'\s+', '', str(page_text)).upper()
+
+    # 한글명 (동명이인 구분자 A/B 제거한 형태)
+    kor = re.sub(r'[A-Za-z]+$', '', str(target.get("kor_name", ""))).strip()
+    if kor and re.sub(r'\s+', '', kor) in norm:
+        return True
+
+    # 영문명 "YU/DONGYUN" → 성·이름 모두 페이지에 있어야 인정
+    eng = str(target.get("eng_name", "")).strip().upper()
+    if eng:
+        parts = [p for p in re.split(r'[/\s]+', eng) if p]
+        if parts and all(re.sub(r'\s+', '', p) in norm for p in parts):
+            return True
+
+    return False
 # ==========================================
 # 체인지로그
+# v3.10.1 (2026-08-26) — [중요] 캐시 오판정 수정 (사용자 리포트)
+#   - 같은 예약번호(PNR)면 이전 결과를 그대로 재사용하면서 그 사람이 실제로
+#     해당 예약 명단에 있는지는 확인하지 않아, 엉뚱한 사람도 '확인완료'로
+#     넘어가던 문제 수정
+#   - 이제 캐시 사용 전 결과 화면에 해당 탑승객(한글명/영문명)이 있는지 확인하고,
+#     확인되지 않으면 캐시를 쓰지 않고 개별 조회함 (화면 표시: [캐시·동승확인])
 # v3.10.0 (2026-08-26) — 이어서 조회 기능 추가
 #   - 실행 시 이미 '확인완료'된 건이 있으면 건너뛸지 묻는 팝업 표시
 #     (한 달치 400건 규모는 1시간 가까이 걸려, 중단 시 처음부터 다시 하던 문제 해소)
@@ -583,6 +628,8 @@ async def check_bx(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
+        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
+        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -725,6 +772,8 @@ async def check_ke(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
+        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
+        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -856,6 +905,8 @@ async def check_lj(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
+        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
+        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -964,6 +1015,8 @@ async def check_we(page, target, we_email):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
+        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
+        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -1354,6 +1407,8 @@ async def check_jj(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
+        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
+        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -1598,11 +1653,18 @@ async def main():
             print(f"[{i:02d}/{pending_total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
 
             cache_key = (pnr, airline)
+            # 캐시는 같은 PNR일 때만 잡히지만, 그 예약에 이 사람이 실제로
+            # 포함돼 있는지까지 확인해야 함 (이름 확인 없이 통과하면 오판정)
+            use_cache = False
             if cache_key in pnr_cache:
+                if _name_in_page(target, _page_cache.get(cache_key, "")):
+                    use_cache = True
+
+            if use_cache:
                 result, detail = pnr_cache[cache_key]
                 target["result"] = result
                 target["detail"] = detail
-                print(f"[캐시] {result}  {detail}")
+                print(f"[캐시·동승확인] {result}  {detail}")
             else:
                 # 예상 못한 오류(브라우저 강제종료 등)로 전체가 중단되지 않도록 보호
                 # → 여기까지 조회한 결과는 반드시 엑셀에 저장됨
