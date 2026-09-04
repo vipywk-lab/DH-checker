@@ -16,7 +16,7 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.10.2"
+__version__ = "3.10.3"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
@@ -79,8 +79,11 @@ def _name_in_page(target, page_text):
     return False
 # ==========================================
 # 체인지로그
+# v3.10.3 (2026-09-02) — 대한항공 쿠키 확인창 클릭 안 되던 문제 수정
+#   - 실제 버튼 구조가 예상과 달라(class "-cta", 텍스트는 내부 span에 위치)
+#     클릭이 안 되던 문제 확인, data-click-name="Accept all" 속성 기반으로 수정
 # v3.10.2 (2026-09-02) — 대한항공 쿠키 확인창 자동 처리
-#   - 대한항공 조회 페이지에서 뜨는 "모든 쿠키 허용" 확인창을 자동으로 닫도록 수정
+#   - 대한항공 쿠키 확인창 클릭이 안 되던 문제 수정 (버튼 구조 재확인)
 # v3.10.1 (2026-08-26) — [중요] 캐시 오판정 수정 (사용자 리포트)
 #   - 같은 예약번호(PNR)면 이전 결과를 그대로 재사용하면서 그 사람이 실제로
 #     해당 예약 명단에 있는지는 확인하지 않아, 엉뚱한 사람도 '확인완료'로
@@ -674,10 +677,14 @@ async def check_ke(page, target):
             pass
 
         try:
-            await ke_page.click("button.-confirm:has-text('모든 쿠키 허용')", timeout=3000)
+            await ke_page.click('button[data-click-name="Accept all"]', timeout=3000)
             await ke_page.wait_for_timeout(500)
         except:
-            pass
+            try:
+                await ke_page.click("button:has-text('모든 쿠키 허용')", timeout=2000)
+                await ke_page.wait_for_timeout(500)
+            except:
+                pass
 
         await ke_page.locator("input[maxlength='13']").first.fill(pnr)
         await ke_page.wait_for_timeout(300)
