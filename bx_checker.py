@@ -16,14 +16,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.10.3"
+__version__ = "3.11.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 대한항공 조회 시 뜨는 쿠키 확인 창을 자동으로 넘기도록 수정"
+    "  - [중요] 조회 도중 프로그램이 죽어도 그때까지 결과가 즉시 저장되도록 개선\n"
+    "  - [중요] 같은 예약번호 캐시 기능을 없애고 전원 개별 조회로 변경"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -40,45 +41,21 @@ def _is_reliable_result(flt_found, route_found):
     return not (flt_found == "편명미확인" and route_found == "구간미확인")
 
 
-# 조회 성공 시 결과 페이지 텍스트를 보관 — 같은 PNR의 다른 탑승객이
-# 실제로 그 예약에 포함돼 있는지 확인하는 데 사용
-_page_cache = {}
-
-
-def _remember_page(pnr, airline, page_text):
-    """조회 성공한 결과 페이지 텍스트를 보관 (같은 PNR 동승자 검증용)"""
-    try:
-        _page_cache[(pnr, airline)] = str(page_text)
-    except Exception:
-        pass
-
-
-def _name_in_page(target, page_text):
-    """
-    해당 탑승객이 결과 페이지에 실제로 있는지 확인.
-    한글명 / 영문명(성·이름 각각) 어느 쪽이든 발견되면 True.
-    ※ 사이트가 이름을 가리는 경우(홍*동 등)엔 못 찾을 수 있으며,
-      그때는 캐시를 쓰지 않고 개별 조회하므로 안전하게 동작함.
-    """
-    if not page_text:
-        return False
-    norm = re.sub(r'\s+', '', str(page_text)).upper()
-
-    # 한글명 (동명이인 구분자 A/B 제거한 형태)
-    kor = re.sub(r'[A-Za-z]+$', '', str(target.get("kor_name", ""))).strip()
-    if kor and re.sub(r'\s+', '', kor) in norm:
-        return True
-
-    # 영문명 "YU/DONGYUN" → 성·이름 모두 페이지에 있어야 인정
-    eng = str(target.get("eng_name", "")).strip().upper()
-    if eng:
-        parts = [p for p in re.split(r'[/\s]+', eng) if p]
-        if parts and all(re.sub(r'\s+', '', p) in norm for p in parts):
-            return True
-
-    return False
 # ==========================================
 # 체인지로그
+# v3.11.1 (2026-09-02) — [중요] 두 개의 안정성 수정 병합
+#   - (다른 세션에서 작업) 이어서 조회 기능의 실제 안전성 확보:
+#     기존엔 전체 조회가 끝난 뒤 한 번에 저장해서, 창닫기/작업관리자 종료/
+#     정전 등으로 예고 없이 죽으면 그때까지 결과가 통째로 사라지고
+#     "이어서 조회"도 무용지물이었음. 이제 한 건 처리할 때마다 조용히
+#     엑셀에 즉시 반영 → 어떤 방식으로 죽어도 재실행 시 정확히 다음 건부터 이어짐
+#   - (이 세션에서 작업) v3.11.0의 PNR 캐시 제거를 유지한 채 위 수정과 병합
+# v3.11.0 (2026-09-02) — [중요] PNR 캐시 기능 완전 제거
+#   - v3.10.1에서 동승자 이름 확인 로직을 넣었음에도 오탐 사례가 추가로
+#     보고되어, 캐시 자체를 없애고 같은 예약번호라도 사람마다 항상 개별
+#     조회하도록 변경. 이 도구는 속도보다 정확도가 우선이라는 판단.
+#   - 조회 시간은 늘지만 v3.10.0의 "이어서 조회" 기능으로 중단 시
+#     재조회 부담은 크지 않음
 # v3.10.3 (2026-09-02) — 대한항공 쿠키 확인창 클릭 안 되던 문제 수정
 #   - 실제 버튼 구조가 예상과 달라(class "-cta", 텍스트는 내부 span에 위치)
 #     클릭이 안 되던 문제 확인, data-click-name="Accept all" 속성 기반으로 수정
@@ -420,8 +397,16 @@ def load_targets(path, sheet, start_date, end_date):
     return targets
 
 
-def save_results(path, sheet, targets):
-    """PNR 기반으로 정확하게 매칭해서 저장 + 확인필요 요약 시트 생성"""
+def save_results(path, sheet, targets, silent=False):
+    """PNR 기반으로 정확하게 매칭해서 저장 + 확인필요 요약 시트 생성.
+
+    silent=True: 조회 도중 매 건마다 호출되는 "중간 저장" 모드.
+      - 결과 컬럼만 빠르게 기록하고, 무거운 요약시트 재생성은 생략.
+      - 파일이 열려있어 저장 실패해도 팝업 없이 조용히 넘어감(조회를 막지 않기 위함).
+        다음 건 처리 후 다시 저장을 시도하므로, 결국 파일이 닫히는 순간 반영됨.
+    silent=False(기본): 조회 종료 시 호출되는 "최종 저장". 요약시트 생성 +
+      파일이 열려있으면 팝업으로 안내하고 닫을 때까지 기다림(기존 동작 유지).
+    """
     wb = openpyxl.load_workbook(path, keep_vba=True)
     ws = wb[sheet]
     ws.cell(1, RESULT_COL).value = "검증결과"
@@ -446,6 +431,14 @@ def save_results(path, sheet, targets):
             ws.cell(row_idx, RESULT_COL).value = result
             ws.cell(row_idx, DETAIL_COL).value = detail
             matched_keys.add(key)
+
+    if silent:
+        # 중간 저장: 실패해도 조회 흐름을 막지 않도록 조용히 넘어감
+        try:
+            wb.save(path)
+        except Exception:
+            pass
+        return
 
     # 조회는 했으나 엑셀 행과 매칭 안 된 건 경고 (이름/PNR이 조회 중 미묘하게 달라진 경우)
     unmatched = [t for t in targets if (t["pnr"], t["airline"], t["kor_name"]) not in matched_keys]
@@ -632,8 +625,6 @@ async def check_bx(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
-        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
-        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -786,8 +777,6 @@ async def check_ke(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
-        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
-        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -919,8 +908,6 @@ async def check_lj(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
-        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
-        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -1029,8 +1016,6 @@ async def check_we(page, target, we_email):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
-        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
-        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -1421,8 +1406,6 @@ async def check_jj(page, target):
         if not _is_reliable_result(flt_found, route_found):
             return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
 
-        # 같은 PNR 동승자 검증용으로 결과 페이지 보관
-        _remember_page(pnr, target["airline"], html_content)
         return "✅ 확인완료", detail
 
     except PWTimeout:
@@ -1658,57 +1641,44 @@ async def main():
         if stealth:
             await stealth.apply_stealth_async(page)
 
-        pnr_cache = {}
-
         pending_total = len(pending)
         for i, target in enumerate(pending, 1):
             airline = target["airline"]
             pnr     = target["pnr"]
             print(f"[{i:02d}/{pending_total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
 
-            cache_key = (pnr, airline)
-            # 캐시는 같은 PNR일 때만 잡히지만, 그 예약에 이 사람이 실제로
-            # 포함돼 있는지까지 확인해야 함 (이름 확인 없이 통과하면 오판정)
-            use_cache = False
-            if cache_key in pnr_cache:
-                if _name_in_page(target, _page_cache.get(cache_key, "")):
-                    use_cache = True
+            # v3.11.0: PNR 캐시 제거 — 같은 예약번호라도 사람마다 매번 개별 조회함.
+            # (동승자 이름 검증으로도 오탐 사례가 나와서, 속도보다 정확도를 우선함.
+            #  대신 이어서 조회 기능으로 중단 시 재조회 부담을 줄임)
+            try:
+                result, detail = await run_check(page, target, we_email)
+            except Exception as exc:
+                logging.error(f"조회 중 예외 | {airline} | PNR: {pnr}", exc_info=True)
+                result, detail = "💥 오류", "조회 중 오류 발생 (로그 확인)"
+                if "closed" in str(exc).lower():
+                    target["result"] = result
+                    target["detail"] = detail
+                    print(f"{result}  {detail}")
+                    print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
+                    print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
+                    for rest in pending[i:]:
+                        rest["result"] = "⬜ 미조회"
+                        rest["detail"] = "브라우저 종료로 미처리"
+                    break
+            target["result"] = result
+            target["detail"] = detail
+            print(f"{result}  {detail}")
 
-            if use_cache:
-                result, detail = pnr_cache[cache_key]
-                target["result"] = result
-                target["detail"] = detail
-                print(f"[캐시·동승확인] {result}  {detail}")
-            else:
-                # 예상 못한 오류(브라우저 강제종료 등)로 전체가 중단되지 않도록 보호
-                # → 여기까지 조회한 결과는 반드시 엑셀에 저장됨
-                try:
-                    result, detail = await run_check(page, target, we_email)
-                except Exception as exc:
-                    logging.error(f"조회 중 예외 | {airline} | PNR: {pnr}", exc_info=True)
-                    result, detail = "💥 오류", "조회 중 오류 발생 (로그 확인)"
-                    if "closed" in str(exc).lower():
-                        target["result"] = result
-                        target["detail"] = detail
-                        print(f"{result}  {detail}")
-                        print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
-                        print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
-                        for rest in pending[i:]:
-                            rest["result"] = "⬜ 미조회"
-                            rest["detail"] = "브라우저 종료로 미처리"
-                        break
-                target["result"] = result
-                target["detail"] = detail
-                # 성공한 결과만 캐시에 저장
-                if "확인완료" in result:
-                    pnr_cache[cache_key] = (result, detail)
-                print(f"{result}  {detail}")
-                if i < pending_total:
-                    # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
-                    if target["airline"] == "에어부산":
-                        await asyncio.sleep(random.uniform(5.0, 10.0))
-                    else:
-                        await asyncio.sleep(random.uniform(delay_min, delay_max))
+            # 매 건마다 조용히 중간 저장. 프로그램이 창닫기/강제종료/정전 등으로
+            # 예고 없이 죽어도, 재실행 시 여기까지의 결과는 "이어서 조회"로 살아남음.
+            save_results(EXCEL_PATH, SHEET_NAME, targets, silent=True)
+
+            if i < pending_total:
+                # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
+                if target["airline"] == "에어부산":
+                    await asyncio.sleep(random.uniform(5.0, 10.0))
+                else:
+                    await asyncio.sleep(random.uniform(delay_min, delay_max))
 
         try:
             await browser.close()
