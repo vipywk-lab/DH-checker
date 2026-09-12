@@ -8,7 +8,7 @@ import subprocess
 import webbrowser
 from datetime import datetime, timedelta
 import openpyxl
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 try:
@@ -17,15 +17,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.11.2"
+__version__ = "3.12.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 엑셀 저장 실패 시 무한 반복 대신 [다시시도/취소] 선택 가능 (취소 시 백업파일 저장)\n"
-    "  - 조회 결과를 가벼운 백업파일에도 별도로 남겨 엑셀 손상 시 복구 가능"
+    "  - 조회 진행 상황을 보여주는 작은 창 추가 (진행률, 방금 결과, 실시간 집계)\n"
+    "    화면 오른쪽 위에 뜨며, 콘솔이 멈춘 것처럼 보여도 이 창으로 확인 가능"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -44,6 +44,11 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.12.0 (2026-09-12) — 진행상황 표시창 추가 (Gemini 코드리뷰 반영)
+#   - 조회 시작하면 화면 오른쪽 위에 작은 창이 떠서 진행률 바(N/전체건),
+#     방금 조회한 사람과 결과, 확인완료/불일치/오류·기타 실시간 집계를 보여줌
+#   - "화면이 멈춘 건지 도는 건지 모르겠다"는 불안감 해소 목적
+#   - 이 창을 닫아도(X 버튼) 조회 자체엔 영향 없음, 콘솔이 계속 진행함
 # v3.11.2 (2026-09-12) — 데이터 보호 강화 (Gemini 코드리뷰 반영)
 #   - 엑셀 저장 실패 팝업을 재시도/취소 방식으로 개선. 이전엔 파일이 계속
 #     잠겨있으면 탈출구 없이 무한 반복됐음 → 이제 [취소] 선택 시
@@ -219,6 +224,76 @@ DELAY_MIN  = 1.0
 DELAY_MAX  = 2.0
 
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
+
+
+def create_progress_window(total):
+    """
+    조회 진행 상황을 보여주는 작은 창.
+    콘솔 화면이 멈춘 건지 도는 건지 불안할 때 참고용 — 필수는 아니라
+    창을 닫아도(X 버튼) 조회 자체는 계속 진행됨.
+    """
+    win = tk.Toplevel(root)
+    win.title("타사 예약 검증 — 진행 상황")
+    win.geometry("420x170")
+    win.resizable(False, False)
+    # 콘솔/브라우저 창을 가리지 않도록 오른쪽 위 구석에 배치
+    win.geometry("+%d+%d" % (win.winfo_screenwidth() - 440, 40))
+
+    tk.Label(win, text="조회 진행 중입니다...", font=("맑은 고딕", 11, "bold")).pack(pady=(14, 4))
+
+    count_label = tk.Label(win, text=f"0 / {total}건", font=("맑은 고딕", 10))
+    count_label.pack()
+
+    bar = ttk.Progressbar(win, length=380, maximum=total, value=0)
+    bar.pack(pady=8)
+
+    current_label = tk.Label(win, text="대기 중...", font=("맑은 고딕", 9), fg="#444",
+                              wraplength=380, justify="left")
+    current_label.pack()
+
+    summary_label = tk.Label(win, text="확인완료 0 | 불일치 0 | 오류·기타 0",
+                              font=("맑은 고딕", 9), fg="#666")
+    summary_label.pack(pady=(8, 0))
+
+    win.update_idletasks()
+    return {
+        "win": win, "bar": bar, "count": count_label,
+        "current": current_label, "summary": summary_label,
+        "n_ok": 0, "n_mismatch": 0, "n_other": 0,
+    }
+
+
+def update_progress_window(state, i, total, target, result):
+    """매 건 처리 직후 진행창 내용 갱신 (실패해도 조회 흐름엔 영향 없음)"""
+    if not state:
+        return
+    try:
+        if "확인완료" in result:
+            state["n_ok"] += 1
+        elif "불일치" in result:
+            state["n_mismatch"] += 1
+        else:
+            state["n_other"] += 1
+
+        state["bar"]["value"] = i
+        state["count"].config(text=f"{i} / {total}건")
+        state["current"].config(text=f"방금 조회: {target['kor_name']} ({target['airline']}) → {result}")
+        state["summary"].config(
+            text=f"확인완료 {state['n_ok']} | 불일치 {state['n_mismatch']} | 오류·기타 {state['n_other']}"
+        )
+        state["win"].update_idletasks()
+        state["win"].update()
+    except Exception:
+        pass  # 창을 닫았거나 갱신 실패해도 조회는 계속 진행
+
+
+def close_progress_window(state):
+    if not state:
+        return
+    try:
+        state["win"].destroy()
+    except Exception:
+        pass
 
 
 def ask_resume(done_count, total_count):
@@ -1690,6 +1765,8 @@ async def main():
             await stealth.apply_stealth_async(page)
 
         pending_total = len(pending)
+        progress_state = create_progress_window(pending_total)
+
         for i, target in enumerate(pending, 1):
             airline = target["airline"]
             pnr     = target["pnr"]
@@ -1707,6 +1784,7 @@ async def main():
                     target["result"] = result
                     target["detail"] = detail
                     print(f"{result}  {detail}")
+                    update_progress_window(progress_state, i, pending_total, target, result)
                     print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
                     print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
                     for rest in pending[i:]:
@@ -1716,6 +1794,7 @@ async def main():
             target["result"] = result
             target["detail"] = detail
             print(f"{result}  {detail}")
+            update_progress_window(progress_state, i, pending_total, target, result)
 
             # 매 건마다 조용히 중간 저장. 프로그램이 창닫기/강제종료/정전 등으로
             # 예고 없이 죽어도, 재실행 시 여기까지의 결과는 "이어서 조회"로 살아남음.
@@ -1729,6 +1808,8 @@ async def main():
                     await asyncio.sleep(random.uniform(5.0, 10.0))
                 else:
                     await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+        close_progress_window(progress_state)
 
         try:
             await browser.close()
