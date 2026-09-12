@@ -3,6 +3,7 @@ import random
 import re
 import logging
 import os
+import json
 import subprocess
 import webbrowser
 from datetime import datetime, timedelta
@@ -16,15 +17,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.11.1"
+__version__ = "3.11.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - [중요] 조회 도중 프로그램이 죽어도 그때까지 결과가 즉시 저장되도록 개선\n"
-    "  - [중요] 같은 예약번호 캐시 기능을 없애고 전원 개별 조회로 변경"
+    "  - 엑셀 저장 실패 시 무한 반복 대신 [다시시도/취소] 선택 가능 (취소 시 백업파일 저장)\n"
+    "  - 조회 결과를 가벼운 백업파일에도 별도로 남겨 엑셀 손상 시 복구 가능"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -43,6 +44,12 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.11.2 (2026-09-12) — 데이터 보호 강화 (Gemini 코드리뷰 반영)
+#   - 엑셀 저장 실패 팝업을 재시도/취소 방식으로 개선. 이전엔 파일이 계속
+#     잠겨있으면 탈출구 없이 무한 반복됐음 → 이제 [취소] 선택 시
+#     "검증결과_백업_YYYYMMDD_HHMMSS.xlsx"로 새 파일 저장 후 안전하게 종료
+#   - 조회 결과를 매 건마다 가벼운 JSONL 백업 파일("결과백업_*.jsonl")에도
+#     한 줄씩 남김. 엑셀 파일 자체가 손상되는 최악의 경우에도 이 파일로 복구 가능
 # v3.11.1 (2026-09-02) — [중요] 두 개의 안정성 수정 병합
 #   - (다른 세션에서 작업) 이어서 조회 기능의 실제 안전성 확보:
 #     기존엔 전체 조회가 끝난 뒤 한 번에 저장해서, 창닫기/작업관리자 종료/
@@ -171,6 +178,8 @@ if not os.path.exists(chromium_path):
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(SCRIPT_DIR, f"에러로그_{datetime.now().strftime('%Y%m%d')}.txt")
+# 조회 결과 원본 백업 (엑셀 손상 시 복구용) — 실행할 때마다 새 파일
+JSONL_PATH = os.path.join(SCRIPT_DIR, f"결과백업_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.ERROR,
@@ -397,6 +406,26 @@ def load_targets(path, sheet, start_date, end_date):
     return targets
 
 
+def _append_jsonl_backup(target):
+    """
+    조회 결과 한 건을 JSONL(한 줄에 하나씩) 형태로 즉시 남겨둠.
+    엑셀이 동시접근/비정상종료 등으로 손상되더라도, 이 파일로 결과를 복구할 수 있음.
+    실패해도 조회 흐름을 막지 않도록 조용히 넘어감.
+    """
+    try:
+        with open(JSONL_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "시각"   : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "탑승객" : target.get("kor_name", ""),
+                "항공사" : target.get("airline", ""),
+                "PNR"   : target.get("pnr", ""),
+                "결과"   : target.get("result", ""),
+                "내용"   : target.get("detail", ""),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def save_results(path, sheet, targets, silent=False):
     """PNR 기반으로 정확하게 매칭해서 저장 + 확인필요 요약 시트 생성.
 
@@ -484,7 +513,7 @@ def save_results(path, sheet, targets, silent=False):
     ws_summary.column_dimensions["D"].width = 15
     ws_summary.column_dimensions["E"].width = 40
 
-    # ── 저장 (엑셀 열려있으면 팝업 안내) ──
+    # ── 저장 (엑셀 열려있으면 재시도/취소 안내, 취소 시 백업 파일로 저장) ──
     while True:
         try:
             wb.save(path)
@@ -492,10 +521,29 @@ def save_results(path, sheet, targets, silent=False):
             print(f"→ [확인필요_요약] 시트에서 {error_count}건 확인하세요!" if error_count > 0 else "→ 모든 예약 정상!")
             break
         except Exception:
-            messagebox.showerror(
+            retry = messagebox.askretrycancel(
                 "저장 오류",
-                f"엑셀 파일이 열려있거나 저장할 수 없습니다!\n\n{path}\n\n파일을 닫고 '확인'을 눌러주세요."
+                f"엑셀 파일이 열려있거나 저장할 수 없습니다!\n\n{path}\n\n"
+                f"[다시 시도] 파일을 닫고 다시 눌러주세요.\n"
+                f"[취소] 원본 대신 새 파일로 백업 저장합니다 (결과는 유실되지 않습니다)."
             )
+            if not retry:
+                folder = os.path.dirname(path)
+                stamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = os.path.join(folder, f"검증결과_백업_{stamp}.xlsx")
+                try:
+                    wb.save(backup_path)
+                    print(f"\n⚠️  원본 저장 실패 → 백업 파일로 저장했습니다:")
+                    print(f"   {backup_path}")
+                    messagebox.showinfo(
+                        "백업 저장 완료",
+                        f"원본 대신 아래 파일로 저장했습니다:\n\n{backup_path}\n\n"
+                        f"내용을 확인하고 원본 파일에 옮겨주세요."
+                    )
+                except Exception:
+                    print(f"\n💥 백업 저장도 실패했습니다. 로그 파일을 확인해주세요: {LOG_PATH}")
+                    logging.error("최종 저장 및 백업 저장 모두 실패", exc_info=True)
+                break
 
 
 async def check_bx(page, target):
@@ -1672,6 +1720,8 @@ async def main():
             # 매 건마다 조용히 중간 저장. 프로그램이 창닫기/강제종료/정전 등으로
             # 예고 없이 죽어도, 재실행 시 여기까지의 결과는 "이어서 조회"로 살아남음.
             save_results(EXCEL_PATH, SHEET_NAME, targets, silent=True)
+            # 엑셀 자체가 손상되는 최악의 경우를 대비한 가벼운 원본 백업
+            _append_jsonl_backup(target)
 
             if i < pending_total:
                 # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
