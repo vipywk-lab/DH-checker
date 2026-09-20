@@ -3,6 +3,7 @@ import random
 import re
 import logging
 import os
+import sys
 import json
 import subprocess
 import webbrowser
@@ -17,15 +18,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.12.0"
+__version__ = "3.13.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 조회 진행 상황을 보여주는 작은 창 추가 (진행률, 방금 결과, 실시간 집계)\n"
-    "    화면 오른쪽 위에 뜨며, 콘솔이 멈춘 것처럼 보여도 이 창으로 확인 가능"
+    "  - 윈도우 계정을 바꾼 뒤 브라우저 설치 단계에서 나던 오류 수정\n"
+    "    (\"[WinError 2] 지정된 파일을 찾을 수 없습니다\")"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -44,6 +45,24 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.13.1 (2026-09-21) — 윈도우 계정 변경 후 브라우저 설치 오류 수정
+#   - 증상: 윈도우 계정을 바꾼 뒤 실행하면 "기반 시스템(브라우저)을 설치 중입니다"
+#     단계에서 "[WinError 2] 지정된 파일을 찾을 수 없습니다" 오류 발생
+#   - 원인: playwright 설치 명령을 "PATH에 등록된 playwright 실행파일 이름"으로
+#     찾아 실행했는데, 이 실행파일은 계정별 폴더에 설치되고 PATH 등록도
+#     계정마다 따로라서, 계정을 바꾸면 못 찾는 경우가 있었음
+#   - 수정: 지금 실행 중인 파이썬 자체를 통해 playwright 모듈을 직접 호출하도록
+#     변경 — 어떤 계정에서 실행하든 항상 같은 방식으로 동작함
+# v3.13.0 (2026-09-12) — 조회 속도 개선 (IP밴 위험 없는 범위)
+#   - 캐시 제거(v3.11.0) 후 전수조회로 늘어난 시간 부담 완화 목적
+#   - 항공사 사이트 사이의 딜레이(차단 방지용)는 절대 건드리지 않음 — 오직
+#     우리 코드 내부의 불필요한 고정대기(입력 필드 사이 300ms 등)만 정리
+#     · Playwright의 fill()/click()은 요소가 준비될 때까지 자동으로 기다리므로
+#       입력 직후의 고정 대기는 대부분 중복이었음 → 제거
+#   - 건당 내부 고정대기 총합: 에어부산 6.2초→3.8초, 대한항공 8.7초→5.7초,
+#     진에어 8.5초→4.9초, 파라타 4.9초→2.7초, 제주항공 5.2초→4.1초
+#   - 제주항공은 과거 타이밍 관련 버그가 많았던 곳이라 명백히 중복인 곳만
+#     최소한으로 정리하고 나머지는 그대로 유지(보수적 접근)
 # v3.12.0 (2026-09-12) — 진행상황 표시창 추가 (Gemini 코드리뷰 반영)
 #   - 조회 시작하면 화면 오른쪽 위에 작은 창이 떠서 진행률 바(N/전체건),
 #     방금 조회한 사람과 결과, 확인완료/불일치/오류·기타 실시간 집계를 보여줌
@@ -173,7 +192,9 @@ chromium_path = os.path.expanduser("~\\AppData\\Local\\ms-playwright")
 if not os.path.exists(chromium_path):
     print("기반 시스템(브라우저)을 설치 중입니다. 최초 1회만 진행되며 시간이 조금 걸릴 수 있습니다...")
     try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
+        # sys.executable(현재 실행 중인 파이썬 경로)로 모듈 호출 → PATH에 의존하지 않음
+        # (윈도우 계정을 바꾸면 playwright.exe가 새 계정 PATH에 없어 [WinError 2]가 나던 문제 방지)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
         print("설치 완료!\n")
     except Exception as e:
         print(f"설치 중 오류가 발생했습니다: {e}")
@@ -642,7 +663,7 @@ async def check_bx(page, target):
     bx_page = await page.context.new_page()
     try:
         await bx_page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
-        await bx_page.wait_for_timeout(1500)
+        await bx_page.wait_for_timeout(1000)
 
         # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
         body_check = await bx_page.inner_text("body")
@@ -659,17 +680,16 @@ async def check_bx(page, target):
                 return "⏱️ 타임아웃", "클라우드플레어 차단 미해제 → 재실행 필요"
 
         await bx_page.click("text=예약번호로 조회", timeout=5000)
-        await bx_page.wait_for_timeout(800)
+        await bx_page.wait_for_timeout(500)
 
+        # Playwright의 fill()은 요소가 조작 가능해질 때까지 자동으로 기다리므로
+        # 입력 사이 고정 대기는 불필요 (v3.13.0에서 제거 — 조회 속도 개선)
         await bx_page.locator("input[placeholder*='예약번호']").first.fill(pnr)
-        await bx_page.wait_for_timeout(300)
         await bx_page.locator("input[placeholder='성']").first.fill(last)
-        await bx_page.wait_for_timeout(300)
         await bx_page.locator("input[placeholder='이름']").first.fill(first)
-        await bx_page.wait_for_timeout(300)
 
         await bx_page.evaluate("document.querySelector('.buttonOfflineCheckin').click()")
-        await bx_page.wait_for_timeout(2000)
+        await bx_page.wait_for_timeout(1500)
 
         body_text = await bx_page.inner_text("body")
         if "해당 예약번호가 확인되지 않습니다" in body_text:
@@ -683,7 +703,7 @@ async def check_bx(page, target):
             await bx_page.wait_for_selector("text=항공권 구매완료", timeout=10000)
         except:
             pass
-        await bx_page.wait_for_timeout(1000)
+        await bx_page.wait_for_timeout(800)
 
         html_content = await bx_page.inner_text("body")
 
@@ -782,7 +802,7 @@ async def check_ke(page, target):
     ke_page = await page.context.new_page()
     try:
         await ke_page.goto(KE_URL, wait_until="domcontentloaded", timeout=20000)
-        await ke_page.wait_for_timeout(2000)
+        await ke_page.wait_for_timeout(1200)
 
         try:
             await ke_page.click("button:has-text('동의합니다')", timeout=3000)
@@ -800,11 +820,11 @@ async def check_ke(page, target):
             except:
                 pass
 
+        # fill()은 자동으로 요소 준비상태를 기다리므로 입력 직후 고정대기 제거
         await ke_page.locator("input[maxlength='13']").first.fill(pnr)
-        await ke_page.wait_for_timeout(300)
 
         await ke_page.click("button[data-dialog-id='#dialog-datepicker1']", timeout=5000)
-        await ke_page.wait_for_timeout(1500)
+        await ke_page.wait_for_timeout(1000)
 
         dep_day   = str(dep_date.day)
         dep_month = dep_date.month
@@ -832,12 +852,10 @@ async def check_ke(page, target):
                 }}
             }})();
         """)
-        await ke_page.wait_for_timeout(800)
+        await ke_page.wait_for_timeout(500)
 
         await ke_page.locator("input[autocomplete='family-name']").first.fill(last)
-        await ke_page.wait_for_timeout(300)
         await ke_page.locator("input[autocomplete='given-name']").first.fill(first)
-        await ke_page.wait_for_timeout(300)
 
         await ke_page.click("button:has-text('조회')", timeout=5000)
 
@@ -845,7 +863,7 @@ async def check_ke(page, target):
             await ke_page.wait_for_selector(".journey-info__date", timeout=20000)
         except:
             pass
-        await ke_page.wait_for_timeout(2000)
+        await ke_page.wait_for_timeout(1500)
 
         html_content = await ke_page.inner_text("body")
 
@@ -937,22 +955,18 @@ async def check_lj(page, target):
     lj_page = await page.context.new_page()
     try:
         await lj_page.goto(LJ_URL, wait_until="domcontentloaded", timeout=20000)
-        await lj_page.wait_for_timeout(2000)
+        await lj_page.wait_for_timeout(1200)
 
         await lj_page.click("text=예약조회", timeout=5000)
-        await lj_page.wait_for_timeout(800)
+        await lj_page.wait_for_timeout(500)
 
+        # fill()은 요소 준비상태를 자동 대기하므로 입력 사이 고정대기 제거
         await lj_page.locator("input[placeholder*='6자리']").first.fill(pnr)
-        await lj_page.wait_for_timeout(300)
-
         await lj_page.locator("#lastName_resv").fill(input_last)
-        await lj_page.wait_for_timeout(300)
-
         await lj_page.locator("#firstName_resv").fill(input_first)
-        await lj_page.wait_for_timeout(300)
 
         await lj_page.click("#departureDate_resv", timeout=5000)
-        await lj_page.wait_for_timeout(2000)
+        await lj_page.wait_for_timeout(1200)
 
         dep_str = dep_date.strftime("%Y.%m.%d")
         iframe_locator = lj_page.frame_locator("iframe[src*='basicCalendarLayer']")
@@ -963,7 +977,7 @@ async def check_lj(page, target):
         except:
             pass
 
-        await lj_page.wait_for_timeout(800)
+        await lj_page.wait_for_timeout(500)
         await lj_page.click("button[role='login-button']", timeout=5000)
 
         # 진에어 내부 예약번호 ≠ 조회 PNR — "여정 예약정보" 텍스트로 성공 판정
@@ -971,7 +985,7 @@ async def check_lj(page, target):
             await lj_page.wait_for_selector("text=여정 예약정보", timeout=15000)
         except:
             pass
-        await lj_page.wait_for_timeout(2000)
+        await lj_page.wait_for_timeout(1500)
 
         html_content = await lj_page.inner_text("body")
 
@@ -1061,17 +1075,15 @@ async def check_we(page, target, we_email):
 
     try:
         await page.goto(WE_URL, wait_until="domcontentloaded", timeout=20000)
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(1000)
 
         # 홈페이지 비회원 탭 클릭
         await page.click("a[href='#nonmember']", timeout=5000)
-        await page.wait_for_timeout(800)
+        await page.wait_for_timeout(500)
 
-        # 이메일 + 예약번호 입력
+        # 이메일 + 예약번호 입력 (fill()이 요소 준비상태 자동대기하므로 사이 고정대기 제거)
         await page.fill("#userEmail", we_email)
-        await page.wait_for_timeout(300)
         await page.fill("#reservationNum", pnr)
-        await page.wait_for_timeout(300)
 
         # 예약조회 버튼 클릭
         await page.click("#nonMemberResvSearchBtn", timeout=5000)
@@ -1081,7 +1093,7 @@ async def check_we(page, target, we_email):
             await page.wait_for_url("**/viewReservationDetail.do**", timeout=15000)
         except:
             pass
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(1200)
 
         current_url = page.url
         html_content = await page.inner_text("body")
@@ -1381,16 +1393,13 @@ async def check_jj(page, target):
     jj_page = await page.context.new_page()
     try:
         await jj_page.goto(JJ_URL, wait_until="domcontentloaded", timeout=20000)
-        await jj_page.wait_for_timeout(1500)
+        await jj_page.wait_for_timeout(1000)
 
         # 진입 시 뜨는 마케팅 팝업(그루비 등)이 폼을 가려 클릭이 막히는 문제 방지
         await _dismiss_ad_popup(jj_page)
 
         await jj_page.locator("#recordLocatorLabel").fill(pnr)
-        await jj_page.wait_for_timeout(300)
-
         await jj_page.locator("#psInputLastName_1").fill(input_last)
-        await jj_page.wait_for_timeout(300)
 
         await jj_page.locator("#psInputFirstName_1").fill(input_first)
         await jj_page.locator("#psInputFirstName_1").press("Tab")
