@@ -25,15 +25,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.16.0"
+__version__ = "3.16.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 에어부산 보안확인 방식 변경: 크롬이 먼저 열리면 직접 확인을 통과한 뒤\n"
-    "    팝업의 [확인]을 누르면, 그 창에서 이어서 자동 조회합니다"
+    "  - 에어부산 보안확인 화면이 멈춰서 새로고침해야 넘어가던 문제 개선\n"
+    "    (자동조회용 크롬 연결포트를 고정값 대신 랜덤값으로 변경)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -52,6 +52,15 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.16.1 (2026-09-26) — 에어부산 보안확인 화면 멈춤 현상 개선
+#   - 증상: 크롬 창이 열리고 보안확인(사람인지 확인) 화면에서 멍하게 멈춰있다가,
+#     새로고침하면 그제서야 확인 화면이 다시 뜨면서 정상 통과됨
+#   - 추정 원인: v3.16.0에서 자동화 연결용 디버그 포트를 9222(자동화 도구들이
+#     쓰는 가장 널리 알려진 기본값)로 고정해뒀음. 보안검사 스크립트가 페이지
+#     안에서 이 포트가 열려있는지 확인해 자동화로 의심했을 가능성이 있음
+#     (100% 확정된 원인은 아니며, 실사용 결과로 검증 필요)
+#   - 수정: 포트를 9222로 고정하지 않고 크롬이 매번 랜덤으로 고르게 변경
+#     (크롬 표준 기능인 --remote-debugging-port=0 사용)
 # v3.16.0 (2026-09-25) — 에어부산 보안확인: "사람이 먼저 통과 → 그 창에 연결" 방식
 #   - v3.14~3.15(stealth 조정, Patchright)로도 체크 후 무한반복 해결 안 됨
 #   - 에어부산 건이 있으면 크롬을 자동화 없이 '일반 실행'으로 먼저 띄우고,
@@ -683,9 +692,6 @@ def save_results(path, sheet, targets, silent=False):
                 break
 
 
-CDP_PORT = 9222
-
-
 def _cdp_ready(port):
     import urllib.request
     try:
@@ -695,18 +701,45 @@ def _cdp_ready(port):
         return False
 
 
+async def _read_devtools_port(profile_dir, timeout_sec=20):
+    """
+    --remote-debugging-port=0으로 실행하면 크롬이 실제로 사용할 포트를 직접 골라서
+    <프로필폴더>/DevToolsActivePort 파일의 첫 줄에 적어둠 (크롬 자체 표준 동작).
+    이 파일이 생길 때까지 기다렸다가 포트 번호를 읽어옴.
+    """
+    port_file = os.path.join(profile_dir, "DevToolsActivePort")
+    for _ in range(int(timeout_sec / 0.5)):
+        try:
+            with open(port_file, "r", encoding="utf-8") as f:
+                line = f.readline().strip()
+                if line.isdigit():
+                    return int(line)
+        except FileNotFoundError:
+            pass
+        await asyncio.sleep(0.5)
+    return None
+
+
 async def attach_real_chrome(p, chrome_exe, profile_dir):
     """
     (v3.16.0) 크롬을 '일반 실행'으로 먼저 띄우고 → 사용자가 에어부산 보안확인을 직접 통과 →
     그 다음에 프로그램이 그 창에 붙어서 조회. 보안확인 시점엔 자동화 연결이 전혀 없으므로
     일반 사용자와 완전히 동일한 상태에서 통과됨.
+    (v3.16.1) 디버그 포트를 9222로 고정하지 않고 크롬이 직접 랜덤 포트를 고르게 함
+    — 9222는 자동화 도구들이 쓰는 가장 잘 알려진 기본값이라, 보안검사 스크립트가
+    이 포트가 열려있는지 페이지 안에서 탐지해 자동화로 판단할 가능성이 있음.
     실패 시 (None, None, None) 반환 → 호출부에서 기존 방식으로 대체.
     """
     os.makedirs(profile_dir, exist_ok=True)
+    # 이전 실행의 포트 기록이 남아있으면 새 포트를 못 읽어올 수 있어 미리 제거
+    try:
+        os.remove(os.path.join(profile_dir, "DevToolsActivePort"))
+    except FileNotFoundError:
+        pass
     try:
         proc = subprocess.Popen([
             chrome_exe,
-            f"--remote-debugging-port={CDP_PORT}",
+            "--remote-debugging-port=0",   # 0 = 크롬이 알아서 안 쓰는 포트를 랜덤으로 선택
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -717,12 +750,9 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
         logging.warning(f"크롬 일반 실행 실패: {e}")
         return None, None, None
 
-    for _ in range(40):  # 최대 20초 대기
-        if _cdp_ready(CDP_PORT):
-            break
-        await asyncio.sleep(0.5)
-    else:
-        logging.warning("크롬 연결 포트 응답 없음 (조회용 크롬이 이미 다른 방식으로 켜져 있을 수 있음)")
+    cdp_port = await _read_devtools_port(profile_dir)
+    if cdp_port is None or not _cdp_ready(cdp_port):
+        logging.warning("크롬 연결 포트 확인 실패 (조회용 크롬이 이미 다른 방식으로 켜져 있을 수 있음)")
         print("⚠️  조회용 크롬 연결 실패 → 기존 방식으로 실행합니다. (열린 조회용 크롬 창은 닫아주세요)")
         return None, None, None
 
@@ -739,7 +769,7 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
         "※ 크롬 창은 닫지 마세요. 조회가 끝나면 자동으로 닫힙니다."
     )
     try:
-        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
+        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cdp_port}")
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
         print("✅ 보안확인 통과된 크롬 창에 연결 완료\n")
         return context, browser, proc
