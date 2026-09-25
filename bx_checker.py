@@ -6,6 +6,9 @@ import os
 import sys
 import json
 import subprocess
+import threading
+import time
+import uuid
 import webbrowser
 from datetime import datetime, timedelta
 import openpyxl
@@ -25,19 +28,17 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.16.6"
+__version__ = "3.18.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - [사용법 변경] 에어부산 건이 있으면 크롬 창이 먼저 열립니다.\n"
-    "    '사람인지 확인'이 뜨면 직접 체크 → 예약조회 화면이 보이면 팝업 [확인]\n"
-    "    → 이후 자동 조회. 조회 중엔 크롬 창을 닫지 마세요.\n"
-    "  - 조회 도중 보안확인이 다시 떠도 자동 새로고침으로 이어서 진행\n"
-    "  - '이어서 조회' 시 보안확인이 안 넘어가던 문제, 브라우저가 통째로 닫히던 문제 수정\n"
-    "  - 조회용 크롬에서만 보안확인이 무한반복되던 문제 수정 (매번 새 프로필 사용)"
+    "  - [사용법 변경] 에어부산은 평소 쓰는 크롬에서 확장 프로그램이 자동 조회합니다.\n"
+    "    (최초 1회 'DH조회_확장' 설치 필요 — 폴더 안 설치방법.txt 참고)\n"
+    "    조회 시작 시 에어부산 창이 열리면 '사람인지 확인'만 통과 → 팝업 [확인].\n"
+    "    확장이 없는 PC는 자동으로 수동확인 팝업으로 진행됩니다."
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -56,6 +57,30 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.18.0 (2026-09-26) — 에어부산: 평소 크롬 + 확장 프로그램 자동조회
+#   - v3.17.0 수동확인은 사용자 부담이 커서, 평소 크롬(디버그 포트 없음 → 보안확인 통과됨)
+#     안에서 확장 프로그램이 입력·조회하는 방식으로 자동화
+#   - 구조: 이 프로그램이 127.0.0.1:38517에 작은 창구를 열고, 확장이 1초마다 다음 건을
+#     받아가서 PNR/성/이름 입력 → 조회 → 결과 화면 글자를 돌려줌. 판정은 기존 로직 그대로
+#     (결과 판정 부분을 _parse_bx_text로 분리해 크롬조종·확장 방식이 공유)
+#   - BX_MODE 스위치: "ext"(기본) / "manual" / "auto"(크롬 조종 — 현재 차단됨, 복귀용)
+#   - 확장이 없거나 응답이 없으면 에어부산은 자동으로 수동확인 팝업으로 대체
+#   - 조회 도중 에어부산 탭이 닫히면 20초 후 자동으로 다시 열어줌
+#   - 확장은 이 프로그램이 실행 중일 때만 동작 (평소 에어부산 이용엔 영향 없음)
+#   - 차단 방지 딜레이(5~10초)는 확장 방식에도 그대로 적용
+# v3.17.0 (2026-09-26) — 에어부산 수동확인 방식으로 전환
+#   - 원인 확정 (사용자 PC 테스트): 같은 빈 프로필이라도
+#       A) 디버그 포트 없이 띄운 크롬 → 보안확인 통과
+#       B) 디버그 포트(--remote-debugging-port)를 연 크롬 → 무한반복
+#       C) A에서 통과한 프로필에 포트만 열어 다시 띄움 → 다시 막힘
+#     → 프로그램이 조종할 수 있는 크롬은 통과 쿠키가 있어도 에어부산을 못 지나감.
+#     v3.15.0 Patchright(포트 대신 파이프 사용)도 이미 실패했으므로 자동조회 불가로 판단
+#   - 에어부산을 티웨이와 같은 수동확인(기본 브라우저 + 복사 버튼 팝업)으로 전환.
+#     성/이름은 자동조회 때와 같은 규칙(국제선+영문명→영문, 그 외→한글)으로 표시
+#   - 티웨이 팝업 코드를 공용 함수(_manual_check)로 정리해 두 항공사가 같이 사용
+#   - 자동조회 코드(check_bx, 크롬 먼저 띄우기)는 삭제하지 않고 BX_AUTO 스위치로 보존
+#     → 클라우드플레어 정책이 바뀌면 True로 바꿔 복귀 가능
+#   - 수동확인 건은 조회 간 대기(딜레이) 생략
 # v3.16.6 (2026-09-26) — 조회용 크롬에서만 보안확인 무한반복 수정
 #   - 증상: 첫 크롬 창에서 '사람인지 확인' 체크 → 뱅뱅 돌다가 다시 확인 화면 반복.
 #     같은 PC·같은 IP의 평소 크롬에서는 체크하면 바로 통과됨
@@ -327,6 +352,11 @@ SHEET_NAME = "검증대상"
 RESULT_COL = 8
 DETAIL_COL = 9
 BX_URL     = "https://www.airbusan.com/web/individual/reserve/index"
+# 에어부산 조회 방식 (v3.18.0)
+#   "ext"    : 평소 크롬 + 확장 프로그램으로 자동 조회 (기본값, 확장 없으면 수동확인으로 자동 대체)
+#   "manual" : 수동확인 팝업 (v3.17.0 방식)
+#   "auto"   : 프로그램이 크롬 조종 (클라우드플레어에 막혀 현재 사용 불가 — 정책 바뀌면 복귀용)
+BX_MODE    = "ext"
 KE_URL     = "https://www.koreanair.com/reservation/search"
 LJ_URL     = "https://www.jinair.com/booking/index"
 WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
@@ -893,6 +923,72 @@ def _reraise_if_closed(exc):
         raise exc
 
 
+def _parse_bx_text(html_content, target, pnr):
+    """에어부산 결과 화면 텍스트 → (결과, 상세). 자동조회·확장조회 공용 (v3.18.0 분리)"""
+    # 결과 파싱 전 클라우드플레어 재체크
+    if any(kw in html_content for kw in CF_KEYWORDS):
+        return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
+    if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "일치하는 예약"]):
+        return "❌ 예약없음", "조회결과 없음"
+
+    # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
+    if pnr.upper() not in html_content.upper():
+        return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
+
+    flt_match   = re.search(r'BX\s*\d{3,4}', html_content)
+    date_match  = re.search(r'(\d{4}-\d{2}-\d{2})', html_content)
+
+    # 구간: 한글 도시명 (국내 + 에어부산 국제선 취항지)
+    BX_CITIES = (
+        '부산|서울|김포|제주|대구|광주|청주|인천'
+        '|후쿠오카|오사카|삿포로|도쿄|나리타'
+        '|다낭|나트랑|냐짱|보홀|세부|칼리보|비엔티안|치앙마이'
+        '|타이베이|가오슝|홍콩|마카오|칭다오|옌지|장자제|시안|상하이'
+    )
+    route_match = re.search(
+        rf'({BX_CITIES}).{{1,15}}({BX_CITIES})',
+        html_content
+    )
+
+    if route_match:
+        route_found = route_match.group()
+    else:
+        # fallback: 공항코드로 매칭 (한글 도시명 미표시 대비)
+        codes = re.findall(
+            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+            r'|FUK|KIX|CTS|NRT|HND|NGO'
+            r'|DAD|CXR|TAG|CEB|KLO|VTE|CNX'
+            r'|TPE|KHH|HKG|MFM|TAO|YNJ|DYG|XIY|PVG)(?![A-Z0-9])',
+            html_content
+        )
+        route_found = f"{codes[0]}→{codes[1]}" if len(codes) >= 2 else "구간미확인"
+
+    flt_found   = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
+    date_found  = date_match.group() if date_match else "날짜미확인"
+
+    detail = f"{flt_found} | {date_found} | {route_found}"
+
+    dep_date = parse_dep_date(target["dep_time"])
+    mismatch = []
+    if dep_date and date_found != "날짜미확인":
+        try:
+            site_date = datetime.strptime(date_found, "%Y-%m-%d")
+            if dep_date.date() != site_date.date():
+                mismatch.append(
+                    f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
+                )
+        except:
+            pass
+
+    if mismatch:
+        return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
+
+    if not _is_reliable_result(flt_found, route_found):
+        return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
+
+    return "✅ 확인완료", detail
+
+
 async def check_bx(page, target):
     pnr      = target["pnr"]
     eng_name = target.get("eng_name", "")
@@ -984,68 +1080,7 @@ async def check_bx(page, target):
 
         html_content = await bx_page.inner_text("body")
 
-        # 결과 파싱 전 클라우드플레어 재체크
-        if any(kw in html_content for kw in CF_KEYWORDS):
-            return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
-        if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "일치하는 예약"]):
-            return "❌ 예약없음", "조회결과 없음"
-
-        # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
-        if pnr.upper() not in html_content.upper():
-            return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
-
-        flt_match   = re.search(r'BX\s*\d{3,4}', html_content)
-        date_match  = re.search(r'(\d{4}-\d{2}-\d{2})', html_content)
-
-        # 구간: 한글 도시명 (국내 + 에어부산 국제선 취항지)
-        BX_CITIES = (
-            '부산|서울|김포|제주|대구|광주|청주|인천'
-            '|후쿠오카|오사카|삿포로|도쿄|나리타'
-            '|다낭|나트랑|냐짱|보홀|세부|칼리보|비엔티안|치앙마이'
-            '|타이베이|가오슝|홍콩|마카오|칭다오|옌지|장자제|시안|상하이'
-        )
-        route_match = re.search(
-            rf'({BX_CITIES}).{{1,15}}({BX_CITIES})',
-            html_content
-        )
-
-        if route_match:
-            route_found = route_match.group()
-        else:
-            # fallback: 공항코드로 매칭 (한글 도시명 미표시 대비)
-            codes = re.findall(
-                r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
-                r'|FUK|KIX|CTS|NRT|HND|NGO'
-                r'|DAD|CXR|TAG|CEB|KLO|VTE|CNX'
-                r'|TPE|KHH|HKG|MFM|TAO|YNJ|DYG|XIY|PVG)(?![A-Z0-9])',
-                html_content
-            )
-            route_found = f"{codes[0]}→{codes[1]}" if len(codes) >= 2 else "구간미확인"
-
-        flt_found   = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
-        date_found  = date_match.group() if date_match else "날짜미확인"
-
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        dep_date = parse_dep_date(target["dep_time"])
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if not _is_reliable_result(flt_found, route_found):
-            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-        return "✅ 확인완료", detail
+        return _parse_bx_text(html_content, target, pnr)
 
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
@@ -1455,27 +1490,20 @@ async def check_we(page, target, we_email):
             pass
 
 
-async def check_tw(page, target):
+async def _manual_check(page, target, airline_label, url, fields, guide_extra=""):
     """
-    티웨이항공 — Akamai 봇 차단으로 Playwright 자동 조회/자동입력 불가.
-    Chrome 탭을 열고, 팝업에서 항목별 [복사] 버튼으로 사람이 직접 붙여넣도록 함.
-    (자동 붙여넣기는 Akamai에 감지되어 사용 불가)
+    수동 확인 공용 팝업 — 평소 쓰는 기본 브라우저로 조회 페이지를 열고,
+    항목별 [복사] 버튼으로 사람이 직접 입력·확인한 뒤 결과를 선택.
+    (티웨이: Akamai 차단 / 에어부산: v3.17.0부터 클라우드플레어 차단으로 사용)
     """
-    pnr      = target["pnr"]
-    kor_name = target["kor_name"]
-    eng_name = target.get("eng_name", "")
-    dep_time = target.get("dep_time", "")
-    dep      = target.get("dep", "")
-    arr      = target.get("arr", "")
-
-    # 자동화 창(Playwright)은 티웨이 작업에 쓰지 않음 — 혼동 방지용 안내 문구 표시
+    # 자동화 창은 수동확인에 쓰지 않음 — 혼동 방지용 안내 문구 표시
     try:
         await page.goto(
             "data:text/html,"
             "<html><body style='font-family:sans-serif;padding:60px;"
             "font-size:22px;color:#333;text-align:center;'>"
             "이 창은 자동화 전용입니다.<br><br>"
-            "티웨이항공 조회는<br>"
+            f"{airline_label} 조회는<br>"
             "<b>새로 열린 별도의 브라우저 창</b>에서 진행해주세요."
             "</body></html>",
             timeout=5000
@@ -1484,11 +1512,11 @@ async def check_tw(page, target):
         pass  # 안내 문구 표시 실패해도 조회 자체엔 영향 없음
 
     # 조회 페이지를 시스템 기본 브라우저의 새 창으로 오픈
-    webbrowser.open(TW_URL, new=2)
+    webbrowser.open(url, new=2)
 
     result_box = [None]
     popup = tk.Toplevel()
-    popup.title("티웨이항공 수동 확인")
+    popup.title(f"{airline_label} 수동 확인")
     popup.resizable(False, False)
     popup.attributes("-topmost", True)
     popup.grab_set()
@@ -1496,11 +1524,12 @@ async def check_tw(page, target):
     tk.Label(
         popup,
         text=(
-            "티웨이항공은 보안 정책상 자동 조회가 불가합니다.\n"
+            f"{airline_label}은(는) 보안 정책상 자동 조회가 불가합니다.\n"
             "방금 새로 열린 별도의 브라우저 창에서\n"
             "(자동화 창 아님 — about:blank 창은 무시하세요)\n"
             "아래 항목을 [복사] 버튼으로 복사해 붙여넣어\n"
             "직접 조회한 뒤 결과를 선택해주세요."
+            + guide_extra
         ),
         justify="left", padx=20
     ).pack(pady=(15, 8))
@@ -1520,17 +1549,6 @@ async def check_tw(page, target):
         e.grid(row=row, column=1, padx=6)
         tk.Button(field_frame, text="복사", width=6,
                   command=lambda v=value: _copy(v)).grid(row=row, column=2)
-
-    fields = [("PNR", pnr), ("한글성명", kor_name)]
-    if eng_name:
-        parts = eng_name.split("/")
-        eng_last  = parts[0].strip() if len(parts) >= 1 else eng_name
-        eng_first = parts[1].strip() if len(parts) >= 2 else ""
-        fields.append(("영문성", eng_last))
-        if eng_first:
-            fields.append(("영문이름", eng_first))
-    fields.append(("구간", f"{dep} → {arr}"))
-    fields.append(("출발일", dep_time))
 
     for i, (label, value) in enumerate(fields):
         _add_field(i, label, value)
@@ -1557,6 +1575,232 @@ async def check_tw(page, target):
         return "❌ PNR오류", "[수동확인] 예약 확인 불가"
     else:
         return "⚠️ 수동확인필요", "[수동확인] 보류됨 — 재확인 필요"
+
+
+async def check_tw(page, target):
+    """
+    티웨이항공 — Akamai 봇 차단으로 Playwright 자동 조회/자동입력 불가.
+    Chrome 탭을 열고, 팝업에서 항목별 [복사] 버튼으로 사람이 직접 붙여넣도록 함.
+    (자동 붙여넣기는 Akamai에 감지되어 사용 불가)
+    """
+    pnr      = target["pnr"]
+    kor_name = target["kor_name"]
+    eng_name = target.get("eng_name", "")
+    dep_time = target.get("dep_time", "")
+    dep      = target.get("dep", "")
+    arr      = target.get("arr", "")
+
+    fields = [("PNR", pnr), ("한글성명", kor_name)]
+    if eng_name:
+        parts = eng_name.split("/")
+        eng_last  = parts[0].strip() if len(parts) >= 1 else eng_name
+        eng_first = parts[1].strip() if len(parts) >= 2 else ""
+        fields.append(("영문성", eng_last))
+        if eng_first:
+            fields.append(("영문이름", eng_first))
+    fields.append(("구간", f"{dep} → {arr}"))
+    fields.append(("출발일", dep_time))
+
+    return await _manual_check(page, target, "티웨이항공", TW_URL, fields)
+
+
+# ==========================================
+# (v3.18.0) 에어부산 — 크롬 확장 프로그램 연동
+# 디버그 포트가 열린 크롬은 클라우드플레어를 못 지나가므로, 사용자가 평소 쓰는 크롬에
+# 설치된 확장("DH 조회 도우미")이 입력·조회를 하고, 결과 화면 글자를 여기로 보내줌.
+# 판정은 기존 파이썬 로직(_parse_bx_text) 그대로 사용.
+# 통신: 이 프로그램이 내 PC 안에서만 열리는 작은 창구(127.0.0.1:EXT_PORT)를 열고,
+#       확장이 1초마다 "다음 건 있어?"를 물어보고 결과를 돌려주는 구조
+# ==========================================
+EXT_PORT = 38517
+
+
+class _ExtBridge:
+    def __init__(self):
+        self.lock      = threading.Lock()
+        self.current   = None   # 확장에 넘길 조회 1건
+        self.handed_at = None   # 확장이 가져간 시각
+        self.results   = {}     # id → 결과 화면 텍스트
+        self.last_poll = 0.0    # 확장이 마지막으로 물어본 시각
+        self.server    = None
+        self.available = False  # 확장이 실제로 동작 중인지
+
+    def start(self):
+        import http.server
+        bridge = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, obj):
+                data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_OPTIONS(self):
+                self._send({})
+
+            def do_GET(self):
+                if not self.path.startswith("/next"):
+                    return self._send({"wait": True})
+                with bridge.lock:
+                    bridge.last_poll = time.time()
+                    cur = bridge.current
+                    # 아직 안 가져갔거나, 가져간 지 40초가 지나도 결과가 없으면(페이지 꼬임) 다시 넘김
+                    if cur and (bridge.handed_at is None or time.time() - bridge.handed_at > 40):
+                        bridge.handed_at = time.time()
+                        return self._send({"target": cur})
+                return self._send({"wait": True})
+
+            def do_POST(self):
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n).decode("utf-8"))
+                    with bridge.lock:
+                        bridge.last_poll = time.time()
+                        if bridge.current and body.get("id") == bridge.current["id"]:
+                            bridge.results[body["id"]] = body.get("text", "")
+                except Exception:
+                    pass
+                self._send({"ok": True})
+
+        try:
+            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", EXT_PORT), Handler)
+        except OSError as e:
+            logging.warning(f"확장 연동 창구 열기 실패 (포트 {EXT_PORT} 사용 중): {e}")
+            return False
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        return True
+
+    def stop(self):
+        if self.server:
+            try:
+                self.server.shutdown()
+                self.server.server_close()
+            except Exception:
+                pass
+            self.server = None
+
+    def seen_recently(self, sec):
+        return time.time() - self.last_poll < sec
+
+
+EXT = _ExtBridge()
+
+
+async def setup_bx_extension():
+    """에어부산 건이 있을 때 조회 시작 전에 1회: 창구 열기 → 평소 크롬에 에어부산 열기 → 확장 동작 확인"""
+    if not EXT.start():
+        print("⚠️  확장 연동 창구를 열 수 없음 (프로그램이 이미 켜져 있는지 확인) → 에어부산은 수동확인으로 진행")
+        return
+    webbrowser.open(BX_URL, new=2)
+    print("\n" + "=" * 50)
+    print("  [에어부산] 평소 쓰는 크롬에 에어부산 창이 열렸습니다.")
+    print("  → '사람인지 확인'이 뜨면 체크해서 통과한 뒤 팝업의 [확인]을 누르세요.")
+    print("  → 조회가 끝날 때까지 그 에어부산 탭은 닫지 마세요.")
+    print("=" * 50)
+    messagebox.showinfo(
+        "에어부산 준비",
+        "평소 쓰는 크롬에 에어부산 창이 열렸습니다.\n\n"
+        "1. '사람인지 확인'이 뜨면 체크해서 통과\n"
+        "2. 예약조회 화면이 보이면 이 창의 [확인]\n\n"
+        "※ 조회가 끝날 때까지 그 에어부산 탭은 닫지 마세요.\n"
+        "   (에어부산 입력·조회는 확장 프로그램이 자동으로 합니다)"
+    )
+    for _ in range(20):  # 최대 10초 동안 확장 응답 확인
+        if EXT.seen_recently(5):
+            EXT.available = True
+            print("✅ 에어부산 확장 연결 확인 — 에어부산은 평소 크롬에서 자동 조회합니다\n")
+            return
+        await asyncio.sleep(0.5)
+    print("⚠️  확장 프로그램 응답 없음 → 에어부산은 수동확인으로 진행합니다.")
+    print("   (확장 미설치, 또는 에어부산 탭이 예약조회 화면이 아닌 경우)\n")
+
+
+async def check_bx_ext(page, target):
+    """에어부산 확장 조회 1건. 확장이 없으면 수동확인으로 대체"""
+    if not EXT.available:
+        return await check_bx_manual(page, target)
+
+    pnr      = target["pnr"]
+    eng_name = target.get("eng_name", "")
+    if is_international(target["dep"], target["arr"]) and eng_name:
+        parts = eng_name.split("/")
+        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
+        first = parts[1].strip() if len(parts) >= 2 else target["first"]
+    else:
+        last  = target["last"]
+        first = target["first"]
+
+    tid = uuid.uuid4().hex
+    with EXT.lock:
+        EXT.current   = {"id": tid, "pnr": pnr, "last": last, "first": first}
+        EXT.handed_at = None
+    try:
+        reopened = False
+        start = time.time()
+        while time.time() - start < 120:
+            with EXT.lock:
+                text = EXT.results.pop(tid, None)
+                handed = EXT.handed_at is not None
+            if text is not None:
+                if text == "__FIELD_NOT_FOUND__":
+                    return "💥 오류", "확장: 입력칸을 찾지 못함 (에어부산 화면 변경 가능성)"
+                if "해당 예약번호가 확인되지 않습니다" in text:
+                    return "❌ PNR오류", "해당 예약번호 확인 불가"
+                return _parse_bx_text(text, target, pnr)
+            # 20초 동안 확장이 안 가져가고 연락도 없으면 → 에어부산 탭이 닫힌 것으로 보고 다시 열기
+            if not handed and not reopened and time.time() - start > 20 and not EXT.seen_recently(15):
+                print("\n  ⚠️  에어부산 탭 응답 없음 → 다시 엽니다 (보안확인이 뜨면 통과해주세요)")
+                webbrowser.open(BX_URL, new=2)
+                reopened = True
+            await asyncio.sleep(0.5)
+        return "⏱️ 타임아웃", "확장 응답 없음 — 에어부산 탭이 열려있는지 확인"
+    finally:
+        with EXT.lock:
+            EXT.current = None
+            EXT.results.pop(tid, None)
+
+
+async def check_bx_manual(page, target):
+    """
+    (v3.17.0) 에어부산 수동 확인.
+    테스트 결과 디버그 포트가 열린 크롬(= 프로그램이 조종 가능한 모든 크롬)은
+    클라우드플레어 보안확인을 통과하지 못함 — 통과 쿠키가 있어도 다시 막힘.
+    평소 쓰는 크롬에서는 정상 통과되므로 티웨이와 같은 수동 확인 방식으로 전환.
+    입력값(성/이름)은 자동조회 때와 동일한 규칙: 국제선+영문명 있으면 영문, 아니면 한글
+    """
+    pnr      = target["pnr"]
+    eng_name = target.get("eng_name", "")
+    dep      = target.get("dep", "")
+    arr      = target.get("arr", "")
+
+    if is_international(dep, arr) and eng_name:
+        parts = eng_name.split("/")
+        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
+        first = parts[1].strip() if len(parts) >= 2 else target["first"]
+    else:
+        last  = target["last"]
+        first = target["first"]
+
+    fields = [
+        ("PNR", pnr),
+        ("성", last),
+        ("이름", first),
+        ("구간", f"{dep} → {arr}"),
+        ("출발일", target.get("dep_time", "")),
+    ]
+    guide = (
+        "\n\n※ '사람인지 확인'이 뜨면 체크해서 통과한 뒤 조회하세요.\n"
+        "   [예약번호로 조회] 탭에서 입력하면 됩니다."
+    )
+    return await _manual_check(page, target, "에어부산", BX_URL, fields, guide)
 
 
 async def _dismiss_ad_popup(p):
@@ -1846,13 +2090,23 @@ async def check_jj(page, target):
             pass
 
 
+async def _bx_check(page, target):
+    """에어부산 자동 조회 — 방식(BX_MODE)에 따라 확장 또는 크롬 조종"""
+    if BX_MODE == "ext":
+        return await check_bx_ext(page, target)
+    return await check_bx(page, target)
+
+
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
     airline  = target["airline"]
     eng_name = target.get("eng_name", "")
 
-    if airline == "에어부산":
-        result, detail = await check_bx(page, target)
+    if airline == "에어부산" and (BX_MODE == "manual" or (BX_MODE == "ext" and not EXT.available)):
+        # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
+        return await check_bx_manual(page, target)
+    elif airline == "에어부산":
+        result, detail = await _bx_check(page, target)
     elif airline == "대한항공":
         result, detail = await check_ke(page, target)
     elif airline == "진에어":
@@ -1887,7 +2141,7 @@ async def run_check(page, target, we_email=""):
         await asyncio.sleep(1)
         r2, d2 = result, detail   # 분기 누락 시 NameError 방지
         if airline == "에어부산":
-            r2, d2 = await check_bx(page, tmp)
+            r2, d2 = await _bx_check(page, tmp)
         elif airline == "대한항공":
             r2, d2 = await check_ke(page, tmp)
         elif airline == "진에어":
@@ -1902,7 +2156,7 @@ async def run_check(page, target, we_email=""):
     elif "타임아웃" in result or ("오류" in result and "PNR" not in result and "파싱" not in detail):
         await asyncio.sleep(2)
         if airline == "에어부산":
-            result, detail = await check_bx(page, target)
+            result, detail = await _bx_check(page, target)
         elif airline == "대한항공":
             result, detail = await check_ke(page, target)
         elif airline == "진에어":
@@ -2023,7 +2277,7 @@ async def main():
         chrome_proc = None
         context     = None
         # (v3.16.0) 에어부산 건이 있으면: 크롬 일반 실행 → 사용자가 보안확인 통과 → 그 창에 연결
-        if chrome_exe and bx_cnt > 0:
+        if BX_MODE == "auto" and chrome_exe and bx_cnt > 0:
             context, browser, chrome_proc = await attach_real_chrome(p, chrome_exe, bot_profile)
         cdp_mode = context is not None
 
@@ -2111,6 +2365,9 @@ async def main():
         except Exception:
             pass
 
+        if BX_MODE == "ext" and bx_cnt > 0:
+            await setup_bx_extension()
+
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
 
@@ -2157,13 +2414,20 @@ async def main():
             _append_jsonl_backup(target)
 
             if i < pending_total:
-                # 에어부산은 클라우드플레어 대비 딜레이 더 늘림
-                if target["airline"] == "에어부산":
+                # 수동확인 건(티웨이, 수동모드 에어부산)은 사람이 직접 조회하므로 대기 불필요
+                manual = target["airline"] == "티웨이항공" or (
+                    target["airline"] == "에어부산" and
+                    (BX_MODE == "manual" or (BX_MODE == "ext" and not EXT.available)))
+                if manual:
+                    pass
+                # 에어부산 자동조회(확장 포함) 시엔 차단 방지 딜레이 더 늘림
+                elif target["airline"] == "에어부산":
                     await asyncio.sleep(random.uniform(5.0, 10.0))
                 else:
                     await asyncio.sleep(random.uniform(delay_min, delay_max))
 
         close_progress_window(progress_state)
+        EXT.stop()
 
         if cdp_mode:
             # 조회용 크롬 종료 — 이전 실행에서 살아남은 크롬을 재사용한 경우엔
