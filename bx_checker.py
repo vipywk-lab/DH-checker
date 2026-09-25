@@ -25,15 +25,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.16.1"
+__version__ = "3.16.2"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 에어부산 보안확인 화면이 멈춰서 새로고침해야 넘어가던 문제 개선\n"
-    "    (자동조회용 크롬 연결포트를 고정값 대신 랜덤값으로 변경)"
+    "  - 조회 도중(2건째 이후) 에어부산 보안확인이 다시 뜨면 화면이 멈춘 채로\n"
+    "    안 넘어가는 문제 개선 — 이제 15초마다 자동으로 새로고침을 시도합니다"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -52,6 +52,14 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.16.2 (2026-09-26) — 조회 도중 재등장하는 에어부산 보안확인 새로고침 자동화
+#   - 최초 진입 시 보안확인(사람이 직접 크롬을 통과)은 v3.16.1로 잘 해결됨
+#   - 그런데 조회 도중 2건째 이후 새 탭에서 보안확인이 다시 뜨는 경우가 있었고,
+#     이땐 자동감지 루프가 그냥 가만히 기다리기만 해서 화면이 멈춘 채로 최대
+#     3분 타임아웃까지 흘러가버림 — 정작 필요했던 "새로고침" 동작이 빠져있었음
+#   - 수정: 대기 중 15초마다 자동으로 새로고침(F5와 동일 효과)을 시도하도록 추가.
+#     화면을 앞으로 가져오는 동작(bring_to_front)은 유지 — 사용자가 직접
+#     체크박스를 누르거나 새로고침해도 무방함 (둘 다 동시에 동작 가능)
 # v3.16.1 (2026-09-26) — 에어부산 보안확인 화면 멈춤 현상 개선
 #   - 증상: 크롬 창이 열리고 보안확인(사람인지 확인) 화면에서 멍하게 멈춰있다가,
 #     새로고침하면 그제서야 확인 화면이 다시 뜨면서 정상 통과됨
@@ -812,6 +820,8 @@ async def check_bx(page, target):
             print(f"\n{'='*50}")
             print(f"  ⚠️  [에어부산] 클라우드플레어 보안 확인이 필요합니다!")
             print(f"  → 열린 브라우저에서 '사람인지 확인하십시오' 체크박스를 클릭해주세요.")
+            print(f"  → 화면이 멈춘 것처럼 안 넘어가면 새로고침(F5)해주세요 — 자동으로도")
+            print(f"    주기적으로 새로고침을 시도합니다.")
             print(f"  → 통과되면 자동으로 이어서 진행됩니다 (최대 3분 대기).")
             print(f"{'='*50}")
             try:
@@ -819,13 +829,21 @@ async def check_bx(page, target):
             except Exception:
                 pass
             # 통과 여부 자동 감지 (v3.14.0: 콘솔로 돌아와 엔터 누를 필요 없음)
+            # (v3.16.2) 확인 화면이 멈춘 채로 안 넘어가는 경우가 있어 — 사람이 직접
+            # 새로고침하면 넘어가는 게 확인된 증상 → 15초마다 자동으로 새로고침도 시도
+            # (사용자가 그 사이에 직접 체크박스를 누르고 있어도 문제 없음)
             passed = False
-            for _ in range(180):
+            for i in range(180):
                 await bx_page.wait_for_timeout(1000)
+                if i > 0 and i % 15 == 0:
+                    try:
+                        await bx_page.reload(wait_until="domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
                 try:
                     body_check2 = await bx_page.inner_text("body")
                 except Exception:
-                    continue  # 통과 직후 페이지 전환 중
+                    continue  # 새로고침/통과 직후 페이지 전환 중
                 if not any(kw in body_check2 for kw in CF_KEYWORDS):
                     passed = True
                     break
