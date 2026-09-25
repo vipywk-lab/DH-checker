@@ -18,15 +18,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.13.1"
+__version__ = "3.14.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 윈도우 계정을 바꾼 뒤 브라우저 설치 단계에서 나던 오류 수정\n"
-    "    (\"[WinError 2] 지정된 파일을 찾을 수 없습니다\")"
+    "  - 에어부산 '사람인지 확인' 화면이 덜 뜨도록 개선\n"
+    "  - 확인 화면이 떠도 체크박스만 누르면 자동으로 이어서 진행 (엔터 불필요)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -45,6 +45,17 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.14.0 (2026-09-25) — 에어부산 보안확인(캡챠) 빈도 감소
+#   - [주원인 수정] 위장설정(stealth)이 첫 탭에만 적용되고, 조회마다 새로 여는
+#     탭에는 적용되지 않던 버그 → 브라우저 전체(context)에 적용하도록 변경
+#   - User-Agent를 Chrome/124로 고정하던 것 제거 — 실제 설치된 Chrome 버전과
+#     안 맞아서 오히려 봇 의심 신호가 되고 있었음
+#   - 전용 브라우저 프로필(~\AppData\Local\DH_checker_profile) 사용 → 한 번
+#     통과한 보안확인 기록이 다음 실행에도 유지됨. 평소 Chrome과는 분리됨.
+#     프로필 사용 불가 시(동시 실행 등) 기존 일회성 방식으로 자동 전환
+#   - 보안확인 화면이 뜨면 통과 여부를 1초마다 자동 감지(최대 3분) →
+#     콘솔로 돌아가 엔터 누르는 단계 제거
+#   - 캡챠 자동 클릭/외부 캡챠풀이 서비스는 의도적으로 넣지 않음(약관·안정성)
 # v3.13.1 (2026-09-21) — 윈도우 계정 변경 후 브라우저 설치 오류 수정
 #   - 증상: 윈도우 계정을 바꾼 뒤 실행하면 "기반 시스템(브라우저)을 설치 중입니다"
 #     단계에서 "[WinError 2] 지정된 파일을 찾을 수 없습니다" 오류 발생
@@ -671,13 +682,28 @@ async def check_bx(page, target):
             print(f"\n{'='*50}")
             print(f"  ⚠️  [에어부산] 클라우드플레어 보안 확인이 필요합니다!")
             print(f"  → 열린 브라우저에서 '사람인지 확인하십시오' 체크박스를 클릭해주세요.")
-            print(f"  → 완료 후 여기서 엔터를 눌러주세요.")
+            print(f"  → 통과되면 자동으로 이어서 진행됩니다 (최대 3분 대기).")
             print(f"{'='*50}")
-            await asyncio.get_event_loop().run_in_executor(None, input, "  [확인 후 엔터] ")
-            # 통과됐는지 재확인
-            body_check2 = await bx_page.inner_text("body")
-            if any(kw in body_check2 for kw in CF_KEYWORDS):
+            try:
+                await bx_page.bring_to_front()
+            except Exception:
+                pass
+            # 통과 여부 자동 감지 (v3.14.0: 콘솔로 돌아와 엔터 누를 필요 없음)
+            passed = False
+            for _ in range(180):
+                await bx_page.wait_for_timeout(1000)
+                try:
+                    body_check2 = await bx_page.inner_text("body")
+                except Exception:
+                    continue  # 통과 직후 페이지 전환 중
+                if not any(kw in body_check2 for kw in CF_KEYWORDS):
+                    passed = True
+                    break
+            if not passed:
                 return "⏱️ 타임아웃", "클라우드플레어 차단 미해제 → 재실행 필요"
+            print("  ✅ 보안확인 통과 → 조회 계속")
+            await bx_page.wait_for_load_state("domcontentloaded")
+            await bx_page.wait_for_timeout(1000)
 
         await bx_page.click("text=예약번호로 조회", timeout=5000)
         await bx_page.wait_for_timeout(500)
@@ -1709,9 +1735,10 @@ async def main():
     ]
     chrome_exe = next((p for p in CHROME_PATHS if os.path.exists(p)), None)
 
-    # Chrome 프로필 경로 (쿠키·히스토리 재사용 → 클라우드플레어 신뢰 점수 향상)
-    chrome_profile = os.path.expanduser(r"~\AppData\Local\Google\Chrome\User Data")
-    use_profile = chrome_exe and os.path.exists(chrome_profile)
+    # 조회 전용 브라우저 프로필 (v3.14.0)
+    # 보안확인 통과 쿠키(cf_clearance)가 다음 실행에도 남아 → 캡챠 재등장 빈도 감소
+    # 사용자의 평소 Chrome 프로필과 분리 (Chrome 켜져 있어도 충돌 없음)
+    bot_profile = os.path.expanduser(r"~\AppData\Local\DH_checker_profile")
 
     if chrome_exe:
         print(f"시스템 Chrome 사용: {chrome_exe}")
@@ -1735,18 +1762,27 @@ async def main():
         if chrome_exe:
             launch_kwargs["executable_path"] = chrome_exe
 
-        browser = await p.chromium.launch(**launch_kwargs)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+        # user_agent 고정값 제거 (v3.14.0): 예전엔 Chrome/124로 고정해뒀는데
+        # 실제 설치된 Chrome 버전과 달라서 오히려 봇 의심 신호가 됐음 → 실제 값 그대로 사용
+        ctx_kwargs = dict(
             locale="ko-KR",
             timezone_id="Asia/Seoul",
             viewport={"width": 1280, "height": 800},
             java_script_enabled=True,
         )
+        browser = None
+        try:
+            os.makedirs(bot_profile, exist_ok=True)
+            context = await p.chromium.launch_persistent_context(
+                bot_profile, **launch_kwargs, **ctx_kwargs
+            )
+            print("전용 브라우저 프로필 사용 (보안확인 통과 기록 유지)")
+        except Exception as e:
+            # 프로필 잠김(프로그램 2개 동시 실행 등) → 기존 방식으로 실행
+            logging.warning(f"전용 프로필 실행 실패 → 일회성 모드: {e}")
+            print("⚠️  전용 프로필 사용 불가 → 일회성 모드로 실행 (프로그램이 이미 켜져 있는지 확인)")
+            browser = await p.chromium.launch(**launch_kwargs)
+            context = await browser.new_context(**ctx_kwargs)
 
         # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
         if STEALTH_AVAILABLE:
@@ -1767,11 +1803,13 @@ async def main():
             """)
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
-        page = await context.new_page()
-
-        # stealth를 page에 적용
+        # stealth를 context 전체에 적용 (v3.14.0)
+        # 예전엔 첫 탭(page)에만 적용돼서, 조회마다 새로 여는 탭(bx_page 등)엔
+        # 적용이 안 되고 있었음 → 에어부산 보안확인이 자주 뜨던 주원인
         if stealth:
-            await stealth.apply_stealth_async(page)
+            await stealth.apply_stealth_async(context)
+
+        page = context.pages[0] if context.pages else await context.new_page()
 
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
@@ -1821,7 +1859,9 @@ async def main():
         close_progress_window(progress_state)
 
         try:
-            await browser.close()
+            await context.close()
+            if browser:
+                await browser.close()
         except Exception:
             pass  # 이미 닫혀있으면 무시
 
