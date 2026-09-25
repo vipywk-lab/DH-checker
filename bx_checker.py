@@ -28,17 +28,17 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.18.0"
+__version__ = "3.18.1"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - [사용법 변경] 에어부산은 평소 쓰는 크롬에서 확장 프로그램이 자동 조회합니다.\n"
+    "  - [사용법 변경] 에어부산은 크롬 확장 프로그램이 자동 조회합니다.\n"
     "    (최초 1회 'DH조회_확장' 설치 필요 — 폴더 안 설치방법.txt 참고)\n"
-    "    조회 시작 시 에어부산 창이 열리면 '사람인지 확인'만 통과 → 팝업 [확인].\n"
-    "    확장이 없는 PC는 자동으로 수동확인 팝업으로 진행됩니다."
+    "    조회 시작 시 크롬에 에어부산 창이 열리면 '사람인지 확인'만 통과 → 팝업 [확인].\n"
+    "  - 기본 브라우저가 엣지여도 에어부산은 항상 크롬으로 열립니다"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -57,6 +57,12 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.18.1 (2026-09-26) — 확장 방식 보완
+#   - 에어부산 창을 기본 브라우저가 아닌 '크롬'으로 직접 열도록 변경. 기본 브라우저가
+#     엣지면 엣지로 열려서 확장이 없어 응답 없음 → 수동확인 팝업으로 넘어가던 문제
+#   - 확장 응답이 없을 때 수동확인 팝업으로 넘어가지 않음. 대신 원인 안내와 함께
+#     [다시 시도]/[취소] 선택. 취소 시 에어부산 건은 조회 없이 '수동확인필요'로만
+#     표시 → 확장 확인 후 '이어서 조회'로 처리
 # v3.18.0 (2026-09-26) — 에어부산: 평소 크롬 + 확장 프로그램 자동조회
 #   - v3.17.0 수동확인은 사용자 부담이 커서, 평소 크롬(디버그 포트 없음 → 보안확인 통과됨)
 #     안에서 확장 프로그램이 입력·조회하는 방식으로 자동화
@@ -1624,6 +1630,8 @@ class _ExtBridge:
         self.last_poll = 0.0    # 확장이 마지막으로 물어본 시각
         self.server    = None
         self.available = False  # 확장이 실제로 동작 중인지
+        self.skip      = False  # 사용자가 에어부산 조회를 건너뛰기로 한 경우
+        self.chrome_exe = None
 
     def start(self):
         import http.server
@@ -1694,39 +1702,76 @@ class _ExtBridge:
 EXT = _ExtBridge()
 
 
-async def setup_bx_extension():
-    """에어부산 건이 있을 때 조회 시작 전에 1회: 창구 열기 → 평소 크롬에 에어부산 열기 → 확장 동작 확인"""
-    if not EXT.start():
-        print("⚠️  확장 연동 창구를 열 수 없음 (프로그램이 이미 켜져 있는지 확인) → 에어부산은 수동확인으로 진행")
-        return
+def _open_bx_in_chrome():
+    """
+    에어부산 페이지를 '크롬'으로 열기 (기본 브라우저가 엣지여도 크롬으로).
+    디버그 포트 없이 평소처럼 실행 → 이미 켜진 크롬이 있으면 거기에 탭으로 열림
+    """
+    if EXT.chrome_exe:
+        try:
+            subprocess.Popen([EXT.chrome_exe, BX_URL])
+            return
+        except Exception as e:
+            logging.warning(f"크롬으로 에어부산 열기 실패: {e}")
     webbrowser.open(BX_URL, new=2)
+
+
+async def setup_bx_extension(chrome_exe):
+    """에어부산 건이 있을 때 조회 시작 전에 1회: 창구 열기 → 크롬에 에어부산 열기 → 확장 동작 확인"""
+    EXT.chrome_exe = chrome_exe
+    if not chrome_exe:
+        print("⚠️  크롬이 설치된 위치를 찾지 못해 기본 브라우저로 에어부산을 엽니다 (확장은 크롬에서만 동작)")
+    if not EXT.start():
+        messagebox.showwarning(
+            "에어부산 확장 연결 불가",
+            "확장 연동 창구를 열 수 없습니다.\n(조회 프로그램이 이미 하나 켜져 있는지 확인해주세요)\n\n"
+            "이번 실행에서 에어부산 건은 조회하지 않고 '수동확인필요'로 표시합니다."
+        )
+        EXT.skip = True
+        return
+    _open_bx_in_chrome()
     print("\n" + "=" * 50)
-    print("  [에어부산] 평소 쓰는 크롬에 에어부산 창이 열렸습니다.")
+    print("  [에어부산] 크롬에 에어부산 창이 열렸습니다.")
     print("  → '사람인지 확인'이 뜨면 체크해서 통과한 뒤 팝업의 [확인]을 누르세요.")
     print("  → 조회가 끝날 때까지 그 에어부산 탭은 닫지 마세요.")
     print("=" * 50)
     messagebox.showinfo(
         "에어부산 준비",
-        "평소 쓰는 크롬에 에어부산 창이 열렸습니다.\n\n"
+        "크롬에 에어부산 창이 열렸습니다.\n\n"
         "1. '사람인지 확인'이 뜨면 체크해서 통과\n"
         "2. 예약조회 화면이 보이면 이 창의 [확인]\n\n"
         "※ 조회가 끝날 때까지 그 에어부산 탭은 닫지 마세요.\n"
         "   (에어부산 입력·조회는 확장 프로그램이 자동으로 합니다)"
     )
-    for _ in range(20):  # 최대 10초 동안 확장 응답 확인
-        if EXT.seen_recently(5):
-            EXT.available = True
-            print("✅ 에어부산 확장 연결 확인 — 에어부산은 평소 크롬에서 자동 조회합니다\n")
+    while True:
+        for _ in range(20):  # 최대 10초 동안 확장 응답 확인
+            if EXT.seen_recently(5):
+                EXT.available = True
+                print("✅ 에어부산 확장 연결 확인 — 에어부산은 크롬에서 자동 조회합니다\n")
+                return
+            await asyncio.sleep(0.5)
+        retry = messagebox.askretrycancel(
+            "에어부산 확장 응답 없음",
+            "크롬의 확장 프로그램이 응답하지 않습니다.\n\n"
+            "확인할 것:\n"
+            "  1. 에어부산 창이 '크롬'에 열려 있고, 예약조회 화면인지\n"
+            "     ('사람인지 확인' 화면이면 통과해주세요)\n"
+            "  2. chrome://extensions 에 'DH 조회 도우미'가 설치·켜짐 상태인지\n"
+            "  3. 크롬 프로필이 여러 개면, 확장을 설치한 프로필 창인지\n\n"
+            "[다시 시도] 위 내용 확인 후 다시 연결 확인\n"
+            "[취소] 이번 실행에서 에어부산 건은 조회하지 않고 '수동확인필요'로 표시"
+        )
+        if not retry:
+            EXT.skip = True
+            print("⚠️  에어부산 건은 이번 실행에서 조회하지 않습니다 ('수동확인필요'로 표시)\n")
             return
-        await asyncio.sleep(0.5)
-    print("⚠️  확장 프로그램 응답 없음 → 에어부산은 수동확인으로 진행합니다.")
-    print("   (확장 미설치, 또는 에어부산 탭이 예약조회 화면이 아닌 경우)\n")
+        _open_bx_in_chrome()
 
 
 async def check_bx_ext(page, target):
-    """에어부산 확장 조회 1건. 확장이 없으면 수동확인으로 대체"""
+    """에어부산 확장 조회 1건. 확장이 연결 안 됐으면 조회하지 않고 표시만 (수동 팝업 없음)"""
     if not EXT.available:
-        return await check_bx_manual(page, target)
+        return "⚠️ 수동확인필요", "에어부산 확장 미연결 — 조회 안 함 (크롬 확장 확인 후 이어서 조회)"
 
     pnr      = target["pnr"]
     eng_name = target.get("eng_name", "")
@@ -1757,8 +1802,8 @@ async def check_bx_ext(page, target):
                 return _parse_bx_text(text, target, pnr)
             # 20초 동안 확장이 안 가져가고 연락도 없으면 → 에어부산 탭이 닫힌 것으로 보고 다시 열기
             if not handed and not reopened and time.time() - start > 20 and not EXT.seen_recently(15):
-                print("\n  ⚠️  에어부산 탭 응답 없음 → 다시 엽니다 (보안확인이 뜨면 통과해주세요)")
-                webbrowser.open(BX_URL, new=2)
+                print("\n  ⚠️  에어부산 탭 응답 없음 → 크롬에 다시 엽니다 (보안확인이 뜨면 통과해주세요)")
+                _open_bx_in_chrome()
                 reopened = True
             await asyncio.sleep(0.5)
         return "⏱️ 타임아웃", "확장 응답 없음 — 에어부산 탭이 열려있는지 확인"
@@ -2102,7 +2147,10 @@ async def run_check(page, target, we_email=""):
     airline  = target["airline"]
     eng_name = target.get("eng_name", "")
 
-    if airline == "에어부산" and (BX_MODE == "manual" or (BX_MODE == "ext" and not EXT.available)):
+    if airline == "에어부산" and BX_MODE == "ext" and not EXT.available:
+        # 확장 미연결 → 조회하지 않고 표시만 (재시도 대상 아님)
+        return await check_bx_ext(page, target)
+    if airline == "에어부산" and BX_MODE == "manual":
         # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
         return await check_bx_manual(page, target)
     elif airline == "에어부산":
@@ -2366,7 +2414,7 @@ async def main():
             pass
 
         if BX_MODE == "ext" and bx_cnt > 0:
-            await setup_bx_extension()
+            await setup_bx_extension(chrome_exe)
 
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
