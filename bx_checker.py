@@ -11,22 +11,29 @@ from datetime import datetime, timedelta
 import openpyxl
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
-from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+# Patchright(자동화 흔적을 브라우저 내부에서 제거한 Playwright 호환판)가 설치돼 있으면 우선 사용
+# — 에어부산 보안확인이 체크해도 무한반복되는 문제 대응 (v3.15.0). 없으면 기존 Playwright
+try:
+    from patchright.async_api import async_playwright, TimeoutError as PWTimeout
+    PATCHRIGHT = True
+except ImportError:
+    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
+    PATCHRIGHT = False
 try:
     from playwright_stealth import Stealth
-    STEALTH_AVAILABLE = True
+    STEALTH_AVAILABLE = not PATCHRIGHT  # Patchright 사용 시 stealth 병행 금지(충돌)
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.14.0"
+__version__ = "3.15.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 에어부산 '사람인지 확인' 화면이 덜 뜨도록 개선\n"
-    "  - 확인 화면이 떠도 체크박스만 누르면 자동으로 이어서 진행 (엔터 불필요)"
+    "  - 에어부산 '사람인지 확인' 체크 후에도 넘어가지 않던 문제 대응\n"
+    "    (최초 1회: 명령 프롬프트에서  py -m pip install patchright  실행 필요)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -45,6 +52,22 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.15.0 (2026-09-25) — 에어부산 보안확인 무한반복 대응: Patchright 도입
+#   - v3.14.1 이후에도 체크박스를 눌러도 넘어가지 않음 → stealth 문제가 아니라
+#     Playwright 자체의 자동화 흔적(브라우저 조종 채널 신호, 자동화 플래그)을
+#     Cloudflare가 감지하는 것으로 판단
+#   - Patchright: Playwright와 사용법이 100% 같고, 이 흔적들을 브라우저 내부에서
+#     제거한 호환판. 설치돼 있으면 자동으로 사용, 없으면 기존 Playwright로 동작
+#   - Patchright 사용 시 stealth·커스텀 인자·고정 창크기는 끔 (충돌 방지 권장사항)
+#   - 사람이 체크박스를 누르는 구조는 그대로 — 캡챠 자동풀이는 넣지 않음
+# v3.14.1 (2026-09-25) — 에어부산 보안확인 무한반복 수정 (v3.14.0 회귀)
+#   - v3.14.0에서 stealth를 모든 탭에 적용하도록 바꾼 뒤, 에어부산 확인창에서
+#     체크해도 넘어가지 않고 계속 확인만 반복되는 현상 발생
+#   - 원인: Cloudflare가 stealth의 가짜 브라우저 정보(플랫폼·플러그인 위장 등)를
+#     실제 Chrome 정보와 안 맞는 이상 신호로 판단. v3.13 이전엔 조회용 새 탭에
+#     stealth가 안 걸려 있어서 우연히 체크가 통과되고 있었던 것
+#   - 수정: stealth 적용 범위를 원래대로(첫 탭만) 되돌림. 전용 프로필·UA 고정 제거·
+#     통과 자동감지는 유지
 # v3.14.0 (2026-09-25) — 에어부산 보안확인(캡챠) 빈도 감소
 #   - [주원인 수정] 위장설정(stealth)이 첫 탭에만 적용되고, 조회마다 새로 여는
 #     탭에는 적용되지 않던 버그 → 브라우저 전체(context)에 적용하도록 변경
@@ -1761,6 +1784,9 @@ async def main():
         )
         if chrome_exe:
             launch_kwargs["executable_path"] = chrome_exe
+        if PATCHRIGHT:
+            # Patchright는 자체적으로 자동화 흔적을 처리하므로 커스텀 인자를 최소화해야 함
+            launch_kwargs["args"] = ["--window-size=1280,800"]
 
         # user_agent 고정값 제거 (v3.14.0): 예전엔 Chrome/124로 고정해뒀는데
         # 실제 설치된 Chrome 버전과 달라서 오히려 봇 의심 신호가 됐음 → 실제 값 그대로 사용
@@ -1770,6 +1796,8 @@ async def main():
             viewport={"width": 1280, "height": 800},
             java_script_enabled=True,
         )
+        if PATCHRIGHT:
+            ctx_kwargs["viewport"] = None  # 실제 창 크기 그대로 (Patchright 권장)
         browser = None
         try:
             os.makedirs(bot_profile, exist_ok=True)
@@ -1785,7 +1813,10 @@ async def main():
             context = await browser.new_context(**ctx_kwargs)
 
         # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
-        if STEALTH_AVAILABLE:
+        if PATCHRIGHT:
+            stealth = None
+            print("Patchright 모드 (자동화 흔적 제거 브라우저)")
+        elif STEALTH_AVAILABLE:
             stealth = Stealth(
                 navigator_languages_override=("ko-KR", "ko"),
                 navigator_platform_override="Win32",
@@ -1803,13 +1834,14 @@ async def main():
             """)
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
-        # stealth를 context 전체에 적용 (v3.14.0)
-        # 예전엔 첫 탭(page)에만 적용돼서, 조회마다 새로 여는 탭(bx_page 등)엔
-        # 적용이 안 되고 있었음 → 에어부산 보안확인이 자주 뜨던 주원인
-        if stealth:
-            await stealth.apply_stealth_async(context)
-
         page = context.pages[0] if context.pages else await context.new_page()
+
+        # stealth는 첫 탭(page)에만 적용 — v3.14.0에서 context 전체로 넓혔다가
+        # 에어부산 보안확인이 체크 후에도 무한반복되는 문제 발생 → v3.14.1에서 원복.
+        # (Cloudflare가 stealth의 가짜 브라우저 정보를 오히려 이상 신호로 판단.
+        #  조회용 새 탭은 위장 없는 순수 Chrome 상태가 사람 체크 통과에 유리)
+        if stealth:
+            await stealth.apply_stealth_async(page)
 
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
