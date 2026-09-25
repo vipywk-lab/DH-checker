@@ -25,7 +25,7 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.16.5"
+__version__ = "3.16.6"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
@@ -36,7 +36,8 @@ LATEST_CHANGELOG = (
     "    '사람인지 확인'이 뜨면 직접 체크 → 예약조회 화면이 보이면 팝업 [확인]\n"
     "    → 이후 자동 조회. 조회 중엔 크롬 창을 닫지 마세요.\n"
     "  - 조회 도중 보안확인이 다시 떠도 자동 새로고침으로 이어서 진행\n"
-    "  - '이어서 조회' 시 보안확인이 안 넘어가던 문제, 브라우저가 통째로 닫히던 문제 수정"
+    "  - '이어서 조회' 시 보안확인이 안 넘어가던 문제, 브라우저가 통째로 닫히던 문제 수정\n"
+    "  - 조회용 크롬에서만 보안확인이 무한반복되던 문제 수정 (매번 새 프로필 사용)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -55,6 +56,14 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.16.6 (2026-09-26) — 조회용 크롬에서만 보안확인 무한반복 수정
+#   - 증상: 첫 크롬 창에서 '사람인지 확인' 체크 → 뱅뱅 돌다가 다시 확인 화면 반복.
+#     같은 PC·같은 IP의 평소 크롬에서는 체크하면 바로 통과됨
+#   - 원인(추정): 조회용 전용 프로필을 계속 재사용하면서, 테스트 중 실패한 보안확인
+#     기록(클라우드플레어 쿠키)이 그 프로필에 쌓임 → 그 프로필 자체가 의심받음
+#   - 수정: 실행할 때마다 완전히 새 프로필(run_날짜시각 폴더)로 크롬을 띄움.
+#     이전 실행에서 남은 조회용 크롬은 먼저 닫고, 예전 프로필 폴더는 자동 삭제.
+#     (v3.16.4의 '남은 크롬 재사용'은 오염된 상태를 이어받을 수 있어 폐기)
 # v3.16.5 (2026-09-26) — 배포 전 전체 점검에서 나온 안정성 보완 3건
 #   - 보안확인 대기 중 자동 새로고침 간격 15초 → 30초 (사람이 체크박스를 누르는
 #     도중에 새로고침돼서 확인이 끊기는 것 방지)
@@ -764,6 +773,42 @@ async def _read_devtools_port(profile_dir, timeout_sec=20):
     return None
 
 
+async def _cleanup_old_profiles(p, profile_dir):
+    """
+    이전 실행에서 남은 조회용 크롬을 닫고 예전 프로필 폴더를 정리 (실패해도 무시).
+    - 프로필 폴더 바로 아래(v3.16.0~3.16.5 방식)와 run_* 하위 폴더(v3.16.6~) 모두 확인
+    """
+    import shutil
+    candidates = [profile_dir] + [
+        os.path.join(profile_dir, d) for d in os.listdir(profile_dir)
+        if d.startswith("run_") and os.path.isdir(os.path.join(profile_dir, d))
+    ]
+    closed_any = False
+    for d in candidates:
+        try:
+            with open(os.path.join(d, "DevToolsActivePort"), "r", encoding="utf-8") as f:
+                line = f.readline().strip()
+            if line.isdigit() and _cdp_ready(int(line)):
+                br = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{line}")
+                try:
+                    cdp = await br.new_browser_cdp_session()
+                    await cdp.send("Browser.close")
+                    closed_any = True
+                except Exception:
+                    pass
+                try:
+                    await br.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if closed_any:
+        print("이전에 남아있던 조회용 크롬을 닫았습니다.")
+        await asyncio.sleep(2)  # 크롬이 파일 잠금을 풀 시간
+    for d in candidates[1:]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 async def attach_real_chrome(p, chrome_exe, profile_dir):
     """
     (v3.16.0) 크롬을 '일반 실행'으로 먼저 띄우고 → 사용자가 에어부산 보안확인을 직접 통과 →
@@ -775,33 +820,20 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
     실패 시 (None, None, None) 반환 → 호출부에서 기존 방식으로 대체.
     """
     os.makedirs(profile_dir, exist_ok=True)
-    port_file = os.path.join(profile_dir, "DevToolsActivePort")
 
-    # (v3.16.4) 이전 실행이 중간에 끊겨서(콘솔 창 닫힘 등) 조회용 크롬이 아직 살아있는지 확인.
-    # 예전엔 포트 기록 파일을 무조건 지웠는데, 크롬이 살아있으면 새로 실행해도 기존 크롬에
-    # 창만 하나 추가되고 새 포트 기록이 안 생김 → 연결 실패 → 자동화 브라우저로 대체 실행
-    # → 보안확인 체크해도 안 넘어감 ("이어서 조회" 때만 발생하던 문제의 원인)
-    existing_port = None
-    try:
-        with open(port_file, "r", encoding="utf-8") as f:
-            line = f.readline().strip()
-            if line.isdigit() and _cdp_ready(int(line)):
-                existing_port = int(line)
-    except FileNotFoundError:
-        pass
-    if existing_port:
-        print("이전에 열려있던 조회용 크롬을 다시 사용합니다.")
-    else:
-        # 살아있는 크롬이 없으면 오래된 포트 기록만 제거
-        try:
-            os.remove(port_file)
-        except FileNotFoundError:
-            pass
+    # (v3.16.6) 매 실행마다 "완전히 새 프로필"로 크롬을 띄움.
+    # 같은 프로필을 계속 쓰면, 여러 번 실패한 보안확인 기록(쿠키)이 쌓여서 클라우드플레어가
+    # 그 프로필 자체를 의심 → 평소 크롬에선 통과되는데 조회용 크롬에서만 체크가 무한반복됨.
+    # 이전 실행에서 남은 조회용 크롬은 먼저 닫고, 예전 프로필은 지움.
+    await _cleanup_old_profiles(p, profile_dir)
+    run_dir = os.path.join(profile_dir, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    os.makedirs(run_dir, exist_ok=True)
+
     try:
         proc = subprocess.Popen([
             chrome_exe,
             "--remote-debugging-port=0",   # 0 = 크롬이 알아서 안 쓰는 포트를 랜덤으로 선택
-            f"--user-data-dir={profile_dir}",
+            f"--user-data-dir={run_dir}",
             "--no-first-run",
             "--no-default-browser-check",
             "--window-size=1280,800",
@@ -811,11 +843,14 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
         logging.warning(f"크롬 일반 실행 실패: {e}")
         return None, None, None
 
-    # 기존 크롬이 살아있으면 위 실행은 그 크롬에 에어부산 창만 새로 열어주고 끝남
-    cdp_port = existing_port or await _read_devtools_port(profile_dir)
+    cdp_port = await _read_devtools_port(run_dir)
     if cdp_port is None or not _cdp_ready(cdp_port):
-        logging.warning("크롬 연결 포트 확인 실패 (조회용 크롬이 이미 다른 방식으로 켜져 있을 수 있음)")
-        print("⚠️  조회용 크롬 연결 실패 → 기존 방식으로 실행합니다. (열린 조회용 크롬 창은 닫아주세요)")
+        logging.warning("크롬 연결 포트 확인 실패")
+        print("⚠️  조회용 크롬 연결 실패 → 기존 방식으로 실행합니다.")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
         return None, None, None
 
     print("\n" + "=" * 50)
