@@ -25,15 +25,15 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.15.0"
+__version__ = "3.16.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 에어부산 '사람인지 확인' 체크 후에도 넘어가지 않던 문제 대응\n"
-    "    (최초 1회: 명령 프롬프트에서  py -m pip install patchright  실행 필요)"
+    "  - 에어부산 보안확인 방식 변경: 크롬이 먼저 열리면 직접 확인을 통과한 뒤\n"
+    "    팝업의 [확인]을 누르면, 그 창에서 이어서 자동 조회합니다"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -52,6 +52,13 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.16.0 (2026-09-25) — 에어부산 보안확인: "사람이 먼저 통과 → 그 창에 연결" 방식
+#   - v3.14~3.15(stealth 조정, Patchright)로도 체크 후 무한반복 해결 안 됨
+#   - 에어부산 건이 있으면 크롬을 자동화 없이 '일반 실행'으로 먼저 띄우고,
+#     사용자가 보안확인을 직접 통과한 뒤 [확인] → 프로그램이 그 크롬에 연결해 조회
+#     (보안확인 시점엔 자동화 연결이 아예 없어서 일반 사용자와 동일)
+#   - 전용 프로필(DH_checker_profile) 사용, 조회 끝나면 그 크롬은 자동 종료
+#   - 연결 실패/크롬 미설치/에어부산 0건이면 기존 방식 그대로
 # v3.15.0 (2026-09-25) — 에어부산 보안확인 무한반복 대응: Patchright 도입
 #   - v3.14.1 이후에도 체크박스를 눌러도 넘어가지 않음 → stealth 문제가 아니라
 #     Playwright 자체의 자동화 흔적(브라우저 조종 채널 신호, 자동화 플래그)을
@@ -674,6 +681,76 @@ def save_results(path, sheet, targets, silent=False):
                     print(f"\n💥 백업 저장도 실패했습니다. 로그 파일을 확인해주세요: {LOG_PATH}")
                     logging.error("최종 저장 및 백업 저장 모두 실패", exc_info=True)
                 break
+
+
+CDP_PORT = 9222
+
+
+def _cdp_ready(port):
+    import urllib.request
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1)
+        return True
+    except Exception:
+        return False
+
+
+async def attach_real_chrome(p, chrome_exe, profile_dir):
+    """
+    (v3.16.0) 크롬을 '일반 실행'으로 먼저 띄우고 → 사용자가 에어부산 보안확인을 직접 통과 →
+    그 다음에 프로그램이 그 창에 붙어서 조회. 보안확인 시점엔 자동화 연결이 전혀 없으므로
+    일반 사용자와 완전히 동일한 상태에서 통과됨.
+    실패 시 (None, None, None) 반환 → 호출부에서 기존 방식으로 대체.
+    """
+    os.makedirs(profile_dir, exist_ok=True)
+    try:
+        proc = subprocess.Popen([
+            chrome_exe,
+            f"--remote-debugging-port={CDP_PORT}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--window-size=1280,800",
+            BX_URL,
+        ])
+    except Exception as e:
+        logging.warning(f"크롬 일반 실행 실패: {e}")
+        return None, None, None
+
+    for _ in range(40):  # 최대 20초 대기
+        if _cdp_ready(CDP_PORT):
+            break
+        await asyncio.sleep(0.5)
+    else:
+        logging.warning("크롬 연결 포트 응답 없음 (조회용 크롬이 이미 다른 방식으로 켜져 있을 수 있음)")
+        print("⚠️  조회용 크롬 연결 실패 → 기존 방식으로 실행합니다. (열린 조회용 크롬 창은 닫아주세요)")
+        return None, None, None
+
+    print("\n" + "=" * 50)
+    print("  [에어부산] 열린 크롬 창에서 보안확인을 직접 통과해주세요.")
+    print("  → 예약조회 화면이 보이면 팝업의 [확인]을 누르세요.")
+    print("=" * 50)
+    messagebox.showinfo(
+        "에어부산 보안확인",
+        "방금 열린 크롬 창에서\n\n"
+        "1. '사람인지 확인'이 뜨면 체크해서 통과\n"
+        "2. 에어부산 예약조회 화면이 정상적으로 보이면\n"
+        "   이 창의 [확인]을 눌러주세요.\n\n"
+        "※ 크롬 창은 닫지 마세요. 조회가 끝나면 자동으로 닫힙니다."
+    )
+    try:
+        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        print("✅ 보안확인 통과된 크롬 창에 연결 완료\n")
+        return context, browser, proc
+    except Exception as e:
+        logging.warning(f"크롬 연결(CDP) 실패: {e}")
+        print("⚠️  크롬 연결 실패 → 기존 방식으로 실행합니다.")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        return None, None, None
 
 
 async def check_bx(page, target):
@@ -1771,49 +1848,59 @@ async def main():
     # Chrome 쿠키 파일 임시 복사 (원본 잠금 회피)
     import shutil, tempfile
     async with async_playwright() as p:
-        launch_kwargs = dict(
-            headless=HEADLESS,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-extensions",
-                "--window-size=1280,800",
-            ]
-        )
-        if chrome_exe:
-            launch_kwargs["executable_path"] = chrome_exe
-        if PATCHRIGHT:
-            # Patchright는 자체적으로 자동화 흔적을 처리하므로 커스텀 인자를 최소화해야 함
-            launch_kwargs["args"] = ["--window-size=1280,800"]
+        browser     = None
+        chrome_proc = None
+        context     = None
+        # (v3.16.0) 에어부산 건이 있으면: 크롬 일반 실행 → 사용자가 보안확인 통과 → 그 창에 연결
+        if chrome_exe and bx_cnt > 0:
+            context, browser, chrome_proc = await attach_real_chrome(p, chrome_exe, bot_profile)
+        cdp_mode = context is not None
 
-        # user_agent 고정값 제거 (v3.14.0): 예전엔 Chrome/124로 고정해뒀는데
-        # 실제 설치된 Chrome 버전과 달라서 오히려 봇 의심 신호가 됐음 → 실제 값 그대로 사용
-        ctx_kwargs = dict(
-            locale="ko-KR",
-            timezone_id="Asia/Seoul",
-            viewport={"width": 1280, "height": 800},
-            java_script_enabled=True,
-        )
-        if PATCHRIGHT:
-            ctx_kwargs["viewport"] = None  # 실제 창 크기 그대로 (Patchright 권장)
-        browser = None
-        try:
-            os.makedirs(bot_profile, exist_ok=True)
-            context = await p.chromium.launch_persistent_context(
-                bot_profile, **launch_kwargs, **ctx_kwargs
+        if not cdp_mode:
+            launch_kwargs = dict(
+                headless=HEADLESS,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-extensions",
+                    "--window-size=1280,800",
+                ]
             )
-            print("전용 브라우저 프로필 사용 (보안확인 통과 기록 유지)")
-        except Exception as e:
-            # 프로필 잠김(프로그램 2개 동시 실행 등) → 기존 방식으로 실행
-            logging.warning(f"전용 프로필 실행 실패 → 일회성 모드: {e}")
-            print("⚠️  전용 프로필 사용 불가 → 일회성 모드로 실행 (프로그램이 이미 켜져 있는지 확인)")
-            browser = await p.chromium.launch(**launch_kwargs)
-            context = await browser.new_context(**ctx_kwargs)
+            if chrome_exe:
+                launch_kwargs["executable_path"] = chrome_exe
+            if PATCHRIGHT:
+                # Patchright는 자체적으로 자동화 흔적을 처리하므로 커스텀 인자를 최소화해야 함
+                launch_kwargs["args"] = ["--window-size=1280,800"]
+
+            # user_agent 고정값 제거 (v3.14.0): 예전엔 Chrome/124로 고정해뒀는데
+            # 실제 설치된 Chrome 버전과 달라서 오히려 봇 의심 신호가 됐음 → 실제 값 그대로 사용
+            ctx_kwargs = dict(
+                locale="ko-KR",
+                timezone_id="Asia/Seoul",
+                viewport={"width": 1280, "height": 800},
+                java_script_enabled=True,
+            )
+            if PATCHRIGHT:
+                ctx_kwargs["viewport"] = None  # 실제 창 크기 그대로 (Patchright 권장)
+            try:
+                os.makedirs(bot_profile, exist_ok=True)
+                context = await p.chromium.launch_persistent_context(
+                    bot_profile, **launch_kwargs, **ctx_kwargs
+                )
+                print("전용 브라우저 프로필 사용 (보안확인 통과 기록 유지)")
+            except Exception as e:
+                # 프로필 잠김(프로그램 2개 동시 실행 등) → 기존 방식으로 실행
+                logging.warning(f"전용 프로필 실행 실패 → 일회성 모드: {e}")
+                print("⚠️  전용 프로필 사용 불가 → 일회성 모드로 실행 (프로그램이 이미 켜져 있는지 확인)")
+                browser = await p.chromium.launch(**launch_kwargs)
+                context = await browser.new_context(**ctx_kwargs)
 
         # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
-        if PATCHRIGHT:
+        if cdp_mode:
+            stealth = None  # 실제 크롬에 연결한 상태 → 위장 불필요
+        elif PATCHRIGHT:
             stealth = None
             print("Patchright 모드 (자동화 흔적 제거 브라우저)")
         elif STEALTH_AVAILABLE:
@@ -1891,11 +1978,19 @@ async def main():
         close_progress_window(progress_state)
 
         try:
-            await context.close()
-            if browser:
-                await browser.close()
+            if cdp_mode:
+                await browser.close()  # 연결 해제
+            else:
+                await context.close()
+                if browser:
+                    await browser.close()
         except Exception:
             pass  # 이미 닫혀있으면 무시
+        if chrome_proc:
+            try:
+                chrome_proc.terminate()  # 조회용으로 띄운 크롬 종료
+            except Exception:
+                pass
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
