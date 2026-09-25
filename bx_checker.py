@@ -25,15 +25,18 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.16.2"
+__version__ = "3.16.5"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 조회 도중(2건째 이후) 에어부산 보안확인이 다시 뜨면 화면이 멈춘 채로\n"
-    "    안 넘어가는 문제 개선 — 이제 15초마다 자동으로 새로고침을 시도합니다"
+    "  - [사용법 변경] 에어부산 건이 있으면 크롬 창이 먼저 열립니다.\n"
+    "    '사람인지 확인'이 뜨면 직접 체크 → 예약조회 화면이 보이면 팝업 [확인]\n"
+    "    → 이후 자동 조회. 조회 중엔 크롬 창을 닫지 마세요.\n"
+    "  - 조회 도중 보안확인이 다시 떠도 자동 새로고침으로 이어서 진행\n"
+    "  - '이어서 조회' 시 보안확인이 안 넘어가던 문제, 브라우저가 통째로 닫히던 문제 수정"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -52,6 +55,36 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.16.5 (2026-09-26) — 배포 전 전체 점검에서 나온 안정성 보완 3건
+#   - 보안확인 대기 중 자동 새로고침 간격 15초 → 30초 (사람이 체크박스를 누르는
+#     도중에 새로고침돼서 확인이 끊기는 것 방지)
+#   - 크롬 연결 확인 요청이 회사 프록시 설정을 타지 않도록 함 (다른 PC에서
+#     프록시 때문에 연결 실패 → 자동화 브라우저로 대체되는 상황 예방)
+#   - 사람이 보안확인을 끝낸 탭을 닫아버려도, 브라우저가 살아있으면 새 탭으로
+#     교체해서 계속 진행 (파라타·티웨이는 이 탭을 직접 쓰기 때문에 전체가
+#     중단되던 문제 예방)
+# v3.16.4 (2026-09-26) — "이어서 조회" 시 보안확인 통과 불가 수정
+#   - 증상: 처음 실행 땐 정상인데, 중간에 끊겨서 "이어서 조회"로 재실행하면
+#     에어부산 보안확인 체크박스를 눌러도 넘어가지 않음
+#   - 원인: 이전 실행이 중간에 끊기면(콘솔 창 닫힘 등) 조회용 크롬이 종료되지 않고
+#     남아있음. 재실행 시 포트 기록 파일을 무조건 지운 뒤 크롬을 다시 실행했는데,
+#     같은 프로필의 크롬이 이미 떠 있으면 새 크롬은 기존 크롬에 창만 추가하고
+#     끝나서 새 포트 기록이 생기지 않음 → 20초 대기 후 연결 실패 → 자동화
+#     브라우저(기존 방식)로 대체 실행 → 이 브라우저에선 체크해도 통과 불가
+#   - 수정: 재실행 시 남아있는 조회용 크롬이 응답하면 그 크롬을 그대로 재사용.
+#     종료할 때도 크롬 본체에 직접 종료 명령을 보내서 재사용한 크롬까지 확실히 닫음
+# v3.16.3 (2026-09-26) — 브라우저 통째로 닫힘 대응 + 오류 감지 정확도 개선
+#   - 증상: 에어부산 조회 중 보안확인에 걸린 뒤, 브라우저 자체가 완전히 닫혀서
+#     그 이후 모든 건이 연쇄적으로 실패함 (TargetClosedError)
+#   - 추정 원인: 조회용 탭 하나만 열려있는 상태에서 그 탭이 어떤 이유로든
+#     닫히면(사람이 실수로 닫거나, 사이트 쪽에서 닫히거나) 크롬은 '마지막 창이
+#     닫혔다'고 판단해 프로그램 전체를 종료해버림. 사람이 최초 보안확인을
+#     통과시킨 탭 외에는 상시로 열려있는 탭이 없었던 게 근본 원인
+#   - 수정 1: 아무것도 하지 않는 빈 탭을 하나 띄워두고 절대 닫지 않음 →
+#     다른 탭이 전부 닫혀도 크롬 자체는 계속 살아있음
+#   - 수정 2: 각 항공사 조회 함수의 오류 처리가 "브라우저 닫힘" 오류까지
+#     뭉뚱그려 "💥 오류"로 삼켜버려서, 정작 필요한 시점에 메인 루프가
+#     "브라우저 닫힘"을 못 알아채고 있었음 → 이제 정확히 구분해서 즉시 감지
 # v3.16.2 (2026-09-26) — 조회 도중 재등장하는 에어부산 보안확인 새로고침 자동화
 #   - 최초 진입 시 보안확인(사람이 직접 크롬을 통과)은 v3.16.1로 잘 해결됨
 #   - 그런데 조회 도중 2건째 이후 새 탭에서 보안확인이 다시 뜨는 경우가 있었고,
@@ -703,7 +736,10 @@ def save_results(path, sheet, targets, silent=False):
 def _cdp_ready(port):
     import urllib.request
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1)
+        # 프록시 무시 — 회사 PC에 프록시가 설정돼 있으면 내 PC(127.0.0.1)로 가는
+        # 요청까지 프록시로 보내져서 연결 확인이 실패할 수 있음
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener.open(f"http://127.0.0.1:{port}/json/version", timeout=1)
         return True
     except Exception:
         return False
@@ -739,11 +775,28 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
     실패 시 (None, None, None) 반환 → 호출부에서 기존 방식으로 대체.
     """
     os.makedirs(profile_dir, exist_ok=True)
-    # 이전 실행의 포트 기록이 남아있으면 새 포트를 못 읽어올 수 있어 미리 제거
+    port_file = os.path.join(profile_dir, "DevToolsActivePort")
+
+    # (v3.16.4) 이전 실행이 중간에 끊겨서(콘솔 창 닫힘 등) 조회용 크롬이 아직 살아있는지 확인.
+    # 예전엔 포트 기록 파일을 무조건 지웠는데, 크롬이 살아있으면 새로 실행해도 기존 크롬에
+    # 창만 하나 추가되고 새 포트 기록이 안 생김 → 연결 실패 → 자동화 브라우저로 대체 실행
+    # → 보안확인 체크해도 안 넘어감 ("이어서 조회" 때만 발생하던 문제의 원인)
+    existing_port = None
     try:
-        os.remove(os.path.join(profile_dir, "DevToolsActivePort"))
+        with open(port_file, "r", encoding="utf-8") as f:
+            line = f.readline().strip()
+            if line.isdigit() and _cdp_ready(int(line)):
+                existing_port = int(line)
     except FileNotFoundError:
         pass
+    if existing_port:
+        print("이전에 열려있던 조회용 크롬을 다시 사용합니다.")
+    else:
+        # 살아있는 크롬이 없으면 오래된 포트 기록만 제거
+        try:
+            os.remove(port_file)
+        except FileNotFoundError:
+            pass
     try:
         proc = subprocess.Popen([
             chrome_exe,
@@ -758,7 +811,8 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
         logging.warning(f"크롬 일반 실행 실패: {e}")
         return None, None, None
 
-    cdp_port = await _read_devtools_port(profile_dir)
+    # 기존 크롬이 살아있으면 위 실행은 그 크롬에 에어부산 창만 새로 열어주고 끝남
+    cdp_port = existing_port or await _read_devtools_port(profile_dir)
     if cdp_port is None or not _cdp_ready(cdp_port):
         logging.warning("크롬 연결 포트 확인 실패 (조회용 크롬이 이미 다른 방식으로 켜져 있을 수 있음)")
         print("⚠️  조회용 크롬 연결 실패 → 기존 방식으로 실행합니다. (열린 조회용 크롬 창은 닫아주세요)")
@@ -789,6 +843,19 @@ async def attach_real_chrome(p, chrome_exe, profile_dir):
         except Exception:
             pass
         return None, None, None
+
+
+def _reraise_if_closed(exc):
+    """
+    (v3.16.3) 브라우저/컨텍스트 자체가 닫혀서 난 오류는 이번 한 건만의 문제가
+    아니라 이후 모든 조회가 똑같이 실패할 상황임. 그런데 각 check_* 함수의
+    'except Exception'이 이런 오류까지 "💥 오류"로 뭉뚱그려버리면, 메인 루프가
+    "브라우저 닫힘"을 감지 못 하고 남은 건들을 하나씩 헛되이 재시도하게 됨.
+    → 메시지에 closed가 들어있으면 삼키지 않고 그대로 다시 던져서
+      메인 루프가 즉시 감지하고 남은 건을 "미조회"로 정리하도록 함.
+    """
+    if "closed" in str(exc).lower():
+        raise exc
 
 
 async def check_bx(page, target):
@@ -830,12 +897,13 @@ async def check_bx(page, target):
                 pass
             # 통과 여부 자동 감지 (v3.14.0: 콘솔로 돌아와 엔터 누를 필요 없음)
             # (v3.16.2) 확인 화면이 멈춘 채로 안 넘어가는 경우가 있어 — 사람이 직접
-            # 새로고침하면 넘어가는 게 확인된 증상 → 15초마다 자동으로 새로고침도 시도
+            # 새로고침하면 넘어가는 게 확인된 증상 → 30초마다 자동으로 새로고침도 시도
+            # (15초는 사람이 체크하는 도중에 새로고침돼 끊길 수 있어 v3.16.5에서 30초로)
             # (사용자가 그 사이에 직접 체크박스를 누르고 있어도 문제 없음)
             passed = False
             for i in range(180):
                 await bx_page.wait_for_timeout(1000)
-                if i > 0 and i % 15 == 0:
+                if i > 0 and i % 30 == 0:
                     try:
                         await bx_page.reload(wait_until="domcontentloaded", timeout=10000)
                     except Exception:
@@ -947,10 +1015,14 @@ async def check_bx(page, target):
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
     except Exception as e:
+        _reraise_if_closed(e)
         logging.error(f"에어부산 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
     finally:
-        await bx_page.close()
+        try:
+            await bx_page.close()
+        except Exception:
+            pass
 
 
 async def check_ke(page, target):
@@ -1097,10 +1169,14 @@ async def check_ke(page, target):
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
     except Exception as e:
+        _reraise_if_closed(e)
         logging.error(f"대한항공 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
     finally:
-        await ke_page.close()
+        try:
+            await ke_page.close()
+        except Exception:
+            pass
 
 
 async def check_lj(page, target):
@@ -1224,10 +1300,14 @@ async def check_lj(page, target):
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
     except Exception as e:
+        _reraise_if_closed(e)
         logging.error(f"진에어 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
     finally:
-        await lj_page.close()
+        try:
+            await lj_page.close()
+        except Exception:
+            pass
 
 
 async def check_we(page, target, we_email):
@@ -1329,11 +1409,15 @@ async def check_we(page, target, we_email):
 
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
-    except Exception:
+    except Exception as e:
+        _reraise_if_closed(e)
         logging.error(f"파라타항공 조회 실패 | PNR: {pnr} | 탑승객: {kor_name}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
     finally:
-        page.remove_listener("dialog", _on_dialog)
+        try:
+            page.remove_listener("dialog", _on_dialog)
+        except Exception:
+            pass
 
 
 async def check_tw(page, target):
@@ -1716,11 +1800,15 @@ async def check_jj(page, target):
 
     except PWTimeout:
         return "⏱️ 타임아웃", "재시도 필요"
-    except Exception:
+    except Exception as e:
+        _reraise_if_closed(e)
         logging.error(f"제주항공 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
         return "💥 오류", "시스템 로그 확인 필요"
     finally:
-        await jj_page.close()
+        try:
+            await jj_page.close()
+        except Exception:
+            pass
 
 
 async def run_check(page, target, we_email=""):
@@ -1978,6 +2066,16 @@ async def main():
         if stealth:
             await stealth.apply_stealth_async(page)
 
+        # (v3.16.3) 안전핀 탭 — 크롬은 열려있던 탭이 0개가 되면(사람이 실수로
+        # 첫 탭을 닫거나, 보안검사 페이지가 탭을 강제로 닫는 경우 등) 프로그램
+        # 전체가 종료돼버림. 절대 건드리지 않는 빈 탭을 하나 띄워서 항상 최소
+        # 1개는 열려있게 만들어 이 문제를 원천 차단함.
+        try:
+            _anchor_page = await context.new_page()
+            await _anchor_page.goto("about:blank")
+        except Exception:
+            pass
+
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
 
@@ -1989,6 +2087,13 @@ async def main():
             # v3.11.0: PNR 캐시 제거 — 같은 예약번호라도 사람마다 매번 개별 조회함.
             # (동승자 이름 검증으로도 오탐 사례가 나와서, 속도보다 정확도를 우선함.
             #  대신 이어서 조회 기능으로 중단 시 재조회 부담을 줄임)
+            # (v3.16.5) 메인 탭이 닫혀 있으면(사람이 보안확인 끝난 탭을 닫은 경우 등)
+            # 브라우저는 살아있으니 새 탭으로 교체 — 파라타·티웨이는 메인 탭을 직접 쓰기 때문
+            try:
+                if page.is_closed():
+                    page = await context.new_page()
+            except Exception:
+                pass  # 브라우저 자체가 죽은 경우 → 아래 조회에서 closed로 감지되어 안전 종료
             try:
                 result, detail = await run_check(page, target, we_email)
             except Exception as exc:
@@ -2025,20 +2130,32 @@ async def main():
 
         close_progress_window(progress_state)
 
-        try:
-            if cdp_mode:
+        if cdp_mode:
+            # 조회용 크롬 종료 — 이전 실행에서 살아남은 크롬을 재사용한 경우엔
+            # chrome_proc이 그 크롬 본체가 아니므로, 연결 끊기 전에 크롬에 직접 종료 명령을 보냄
+            closed_ok = False
+            try:
+                cdp = await browser.new_browser_cdp_session()
+                await cdp.send("Browser.close")
+                closed_ok = True
+            except Exception:
+                pass
+            try:
                 await browser.close()  # 연결 해제
-            else:
+            except Exception:
+                pass
+            if not closed_ok and chrome_proc:
+                try:
+                    chrome_proc.terminate()
+                except Exception:
+                    pass
+        else:
+            try:
                 await context.close()
                 if browser:
                     await browser.close()
-        except Exception:
-            pass  # 이미 닫혀있으면 무시
-        if chrome_proc:
-            try:
-                chrome_proc.terminate()  # 조회용으로 띄운 크롬 종료
             except Exception:
-                pass
+                pass  # 이미 닫혀있으면 무시
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
