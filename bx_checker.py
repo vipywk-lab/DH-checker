@@ -28,7 +28,7 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.18.1"
+__version__ = "3.18.3"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
@@ -39,6 +39,8 @@ LATEST_CHANGELOG = (
     "    (최초 1회 'DH조회_확장' 설치 필요 — 폴더 안 설치방법.txt 참고)\n"
     "    조회 시작 시 크롬에 에어부산 창이 열리면 '사람인지 확인'만 통과 → 팝업 [확인].\n"
     "  - 기본 브라우저가 엣지여도 에어부산은 항상 크롬으로 열립니다"
+    "\n  - 엑셀 파일 선택창이 항상 프로그램이 있는 폴더에서 열립니다"
+    "\n  - 조회용 자동화 창에 '닫지 마세요' 안내 표시, 필요 없을 땐 아예 안 띄움"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -57,6 +59,15 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.18.3 (2026-10-08) — 조회용 자동화 창 정리
+#   - 자동화 창이 빈 화면이라 필요 없는 창으로 알고 닫는 경우가 있었음 → 첫 탭과
+#     안전핀 탭에 "조회용 자동화 창 — 닫지 마세요" 안내 화면 표시 (탭 제목에도 표시)
+#   - 대상이 에어부산(확장)·티웨이뿐이면 자동화 창 자체를 띄우지 않음
+#   - 최소화·숨김(헤드리스)은 하지 않음: 제주항공 달력은 사람이 이 창에서 직접
+#     클릭해야 하고, 최소화 시 크롬이 페이지 동작을 늦춰 조회가 불안정해짐
+# v3.18.2 (2026-10-08) — 엑셀 파일 선택창이 항상 프로그램 폴더에서 열리도록
+#   - 시작 폴더를 지정하지 않아서 윈도우가 마지막으로 쓴 폴더를 보여줬음.
+#     공용 PC라 다른 스케줄러가 마지막에 연 폴더가 뜨는 경우가 있었음
 # v3.18.1 (2026-09-26) — 확장 방식 보완
 #   - 에어부산 창을 기본 브라우저가 아닌 '크롬'으로 직접 열도록 변경. 기본 브라우저가
 #     엣지면 엣지로 열려서 확장이 없어 응답 없음 → 수동확인 팝업으로 넘어가던 문제
@@ -349,7 +360,10 @@ root.withdraw()
 messagebox.showinfo("안내", "xlsm 파일을 선택해주세요")
 EXCEL_PATH = filedialog.askopenfilename(
     title="xlsm 파일 선택",
-    filetypes=[("Excel files", "*.xlsm *.xlsx")]
+    filetypes=[("Excel files", "*.xlsm *.xlsx")],
+    # (v3.18.2) 항상 프로그램이 있는 폴더에서 시작 — 지정 안 하면 윈도우가 이 PC에서
+    # 마지막으로 열었던 폴더를 보여줘서, 공용 PC에선 다른 사람이 쓰던 폴더가 뜸
+    initialdir=SCRIPT_DIR,
 )
 if not EXCEL_PATH:
     raise SystemExit("파일을 선택하지 않았습니다.")
@@ -2320,6 +2334,11 @@ async def main():
 
     # Chrome 쿠키 파일 임시 복사 (원본 잠금 회피)
     import shutil, tempfile
+    # (v3.18.3) 자동화 크롬이 필요한 항공사가 있을 때만 띄움
+    # (에어부산 확장조회·티웨이 수동확인은 평소 크롬을 쓰므로 자동화 창이 필요 없음)
+    need_browser = any(t["airline"] in ("대한항공", "진에어", "제주항공", "파라타항공") for t in pending) \
+        or (BX_MODE == "auto" and bx_cnt > 0)
+
     async with async_playwright() as p:
         browser     = None
         chrome_proc = None
@@ -2329,7 +2348,10 @@ async def main():
             context, browser, chrome_proc = await attach_real_chrome(p, chrome_exe, bot_profile)
         cdp_mode = context is not None
 
-        if not cdp_mode:
+        if not cdp_mode and not need_browser:
+            print("조회용 자동화 창은 이번엔 필요 없어 띄우지 않습니다 (에어부산·티웨이만 대상)\n")
+
+        if not cdp_mode and need_browser:
             launch_kwargs = dict(
                 headless=HEADLESS,
                 args=[
@@ -2371,8 +2393,8 @@ async def main():
                 context = await browser.new_context(**ctx_kwargs)
 
         # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
-        if cdp_mode:
-            stealth = None  # 실제 크롬에 연결한 상태 → 위장 불필요
+        if cdp_mode or context is None:
+            stealth = None  # 실제 크롬에 연결했거나 자동화 창을 안 띄운 경우 → 위장 불필요
         elif PATCHRIGHT:
             stealth = None
             print("Patchright 모드 (자동화 흔적 제거 브라우저)")
@@ -2394,7 +2416,9 @@ async def main():
             """)
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
-        page = context.pages[0] if context.pages else await context.new_page()
+        page = None
+        if context is not None:
+            page = context.pages[0] if context.pages else await context.new_page()
 
         # stealth는 첫 탭(page)에만 적용 — v3.14.0에서 context 전체로 넓혔다가
         # 에어부산 보안확인이 체크 후에도 무한반복되는 문제 발생 → v3.14.1에서 원복.
@@ -2407,11 +2431,32 @@ async def main():
         # 첫 탭을 닫거나, 보안검사 페이지가 탭을 강제로 닫는 경우 등) 프로그램
         # 전체가 종료돼버림. 절대 건드리지 않는 빈 탭을 하나 띄워서 항상 최소
         # 1개는 열려있게 만들어 이 문제를 원천 차단함.
-        try:
-            _anchor_page = await context.new_page()
-            await _anchor_page.goto("about:blank")
-        except Exception:
-            pass
+        # (v3.18.3) 자동화 창이 빈 화면이면 필요 없는 창으로 오해해서 닫는 경우가 있어,
+        # 첫 탭과 안전핀 탭에 "닫지 마세요" 안내를 띄워둠 (auto 모드의 첫 탭은 에어부산 화면이라 제외)
+        from urllib.parse import quote as _q
+        guide_url = "data:text/html;charset=utf-8," + _q(
+            "<html><head><title>조회용 자동화 창 - 닫지 마세요</title></head>"
+            "<body style='font-family:sans-serif;padding:60px;font-size:22px;"
+            "color:#333;text-align:center;line-height:1.7'>"
+            "<b style='font-size:28px'>조회용 자동화 창입니다</b><br><br>"
+            "대한항공 · 진에어 · 제주항공 · 파라타 조회에 사용 중입니다.<br>"
+            "<b style='color:#c00'>조회가 끝날 때까지 이 창을 닫지 마세요.</b><br><br>"
+            "<span style='font-size:17px;color:#777'>"
+            "(닫으면 남은 건이 '미조회'로 처리됩니다. 조회가 끝나면 자동으로 닫힙니다)</span>"
+            "</body></html>"
+        )
+        if context is not None:
+            try:
+                _anchor_page = await context.new_page()
+                await _anchor_page.goto(guide_url)
+            except Exception:
+                pass
+            if not cdp_mode:
+                try:
+                    await page.goto(guide_url)
+                    await page.bring_to_front()
+                except Exception:
+                    pass
 
         if BX_MODE == "ext" and bx_cnt > 0:
             await setup_bx_extension(chrome_exe)
@@ -2430,7 +2475,7 @@ async def main():
             # (v3.16.5) 메인 탭이 닫혀 있으면(사람이 보안확인 끝난 탭을 닫은 경우 등)
             # 브라우저는 살아있으니 새 탭으로 교체 — 파라타·티웨이는 메인 탭을 직접 쓰기 때문
             try:
-                if page.is_closed():
+                if page is not None and page.is_closed():
                     page = await context.new_page()
             except Exception:
                 pass  # 브라우저 자체가 죽은 경우 → 아래 조회에서 closed로 감지되어 안전 종료
@@ -2496,7 +2541,7 @@ async def main():
                     chrome_proc.terminate()
                 except Exception:
                     pass
-        else:
+        elif context is not None:
             try:
                 await context.close()
                 if browser:
