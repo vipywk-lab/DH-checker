@@ -28,19 +28,17 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.18.3"
+__version__ = "3.19.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - [사용법 변경] 에어부산은 크롬 확장 프로그램이 자동 조회합니다.\n"
-    "    (최초 1회 'DH조회_확장' 설치 필요 — 폴더 안 설치방법.txt 참고)\n"
-    "    조회 시작 시 크롬에 에어부산 창이 열리면 '사람인지 확인'만 통과 → 팝업 [확인].\n"
-    "  - 기본 브라우저가 엣지여도 에어부산은 항상 크롬으로 열립니다"
-    "\n  - 엑셀 파일 선택창이 항상 프로그램이 있는 폴더에서 열립니다"
-    "\n  - 조회용 자동화 창에 '닫지 마세요' 안내 표시, 필요 없을 땐 아예 안 띄움"
+    "  - 에어부산 확장이 구버전이면 실행 시 업데이트 안내 (조회는 그대로 진행)\n"
+    "  - 30일 지난 결과백업 파일 자동 정리\n"
+    "  - 에어부산 확장 연동 창구 보안 강화, 오류 기록 범위 확대\n"
+    "  - 조회 끝 요약의 '수동확인필요' 안내 문구 수정"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -59,6 +57,16 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.19.0 (2026-10-16) — 코드 점검 반영
+#   - [보안] 확장 연동 창구(127.0.0.1:38517)가 "아무 사이트나 읽어도 됨"(CORS *)으로
+#     응답하던 것 제거 + 웹사이트에서 온 요청(Origin 헤더 있음)은 403 거부.
+#     확장 백그라운드 요청엔 Origin이 없는 것을 실측으로 확인함
+#   - 로그 기록 수준 ERROR → WARNING (확장·크롬 연결 경고가 기록되지 않던 문제)
+#   - 조회 끝 요약의 "수동확인필요 ← 파라타항공 직접 조회 필요" 문구 수정
+#     (에어부산 확장 미연결·티웨이 보류·제주 건너뜀도 이 칸에 포함되므로)
+#   - 실행 시 30일 지난 결과백업_*.jsonl 자동 삭제
+#   - 확장 v1.1.0부터 자기 버전을 알려줌 → EXT_MIN_VERSION보다 낮으면 업데이트 안내
+#     (v1.0.0은 버전을 안 알려줘서 구버전으로 판정됨)
 # v3.18.3 (2026-10-08) — 조회용 자동화 창 정리
 #   - 자동화 창이 빈 화면이라 필요 없는 창으로 알고 닫는 경우가 있었음 → 첫 탭과
 #     안전핀 탭에 "조회용 자동화 창 — 닫지 마세요" 안내 화면 표시 (탭 제목에도 표시)
@@ -350,10 +358,34 @@ LOG_PATH = os.path.join(SCRIPT_DIR, f"에러로그_{datetime.now().strftime('%Y%
 JSONL_PATH = os.path.join(SCRIPT_DIR, f"결과백업_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
 logging.basicConfig(
     filename=LOG_PATH,
-    level=logging.ERROR,
+    level=logging.WARNING,   # (v3.19.0) 경고도 기록 — 확장·크롬 연결 문제 원인 추적용
     format='%(asctime)s [%(levelname)s] %(message)s',
     encoding='utf-8'
 )
+
+
+
+def _cleanup_old_backups(days=30):
+    """(v3.19.0) 실행마다 생기는 결과백업_*.jsonl 중 30일 지난 것 자동 삭제 (실패해도 무시)"""
+    cutoff = time.time() - days * 86400
+    removed = 0
+    try:
+        for name in os.listdir(SCRIPT_DIR):
+            if name.startswith("결과백업_") and name.endswith(".jsonl"):
+                path = os.path.join(SCRIPT_DIR, name)
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                        removed += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    if removed:
+        print(f"🧹 {days}일 지난 결과백업 파일 {removed}개를 정리했습니다.")
+
+
+_cleanup_old_backups()
 
 root = tk.Tk()
 root.withdraw()
@@ -1633,6 +1665,8 @@ async def check_tw(page, target):
 #       확장이 1초마다 "다음 건 있어?"를 물어보고 결과를 돌려주는 구조
 # ==========================================
 EXT_PORT = 38517
+# (v3.19.0) 이 버전보다 낮은 확장이 연결되면 업데이트 안내 (실행은 계속)
+EXT_MIN_VERSION = "1.1.0"
 
 
 class _ExtBridge:
@@ -1646,6 +1680,7 @@ class _ExtBridge:
         self.available = False  # 확장이 실제로 동작 중인지
         self.skip      = False  # 사용자가 에어부산 조회를 건너뛰기로 한 경우
         self.chrome_exe = None
+        self.ext_version = None  # 확장이 알려준 자기 버전 (구버전 확장은 안 알려줌)
 
     def start(self):
         import http.server
@@ -1655,24 +1690,43 @@ class _ExtBridge:
             def log_message(self, *a):
                 pass
 
-            def _send(self, obj):
+            def _send(self, obj, status=200):
+                # (v3.19.0) "아무 사이트나 읽어도 됨"(CORS *) 헤더 제거 — 확장은 필요 없음
                 data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _from_website(self):
+                """
+                (v3.19.0) 웹사이트에서 보낸 요청이면 거부. 승무원 PNR·이름이 오가는 창구라서.
+                - 확장(백그라운드)이 보내는 요청엔 Origin 표시가 없음 (실측 확인)
+                - 일반 웹페이지가 보내는 요청엔 항상 Origin(https://…)이 붙음
+                """
+                origin = self.headers.get("Origin")
+                if origin and not origin.startswith("chrome-extension://"):
+                    self._send({"error": "forbidden"}, status=403)
+                    return True
+                return False
+
             def do_OPTIONS(self):
+                if self._from_website():
+                    return
                 self._send({})
 
             def do_GET(self):
+                if self._from_website():
+                    return
                 if not self.path.startswith("/next"):
                     return self._send({"wait": True})
+                from urllib.parse import urlparse, parse_qs
+                ver = parse_qs(urlparse(self.path).query).get("v", [None])[0]
                 with bridge.lock:
                     bridge.last_poll = time.time()
+                    if ver:
+                        bridge.ext_version = ver
                     cur = bridge.current
                     # 아직 안 가져갔거나, 가져간 지 40초가 지나도 결과가 없으면(페이지 꼬임) 다시 넘김
                     if cur and (bridge.handed_at is None or time.time() - bridge.handed_at > 40):
@@ -1681,6 +1735,8 @@ class _ExtBridge:
                 return self._send({"wait": True})
 
             def do_POST(self):
+                if self._from_website():
+                    return
                 try:
                     n = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -1730,6 +1786,32 @@ def _open_bx_in_chrome():
     webbrowser.open(BX_URL, new=2)
 
 
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0,)
+
+
+def _warn_if_old_extension():
+    """(v3.19.0) 확장이 구버전이면 업데이트 안내 — 조회는 그대로 진행"""
+    cur = EXT.ext_version or "1.0.0"   # 1.0.0은 버전을 안 알려줌
+    if _ver_tuple(cur) >= _ver_tuple(EXT_MIN_VERSION):
+        return
+    print(f"⚠️  에어부산 확장이 구버전입니다 (현재 v{cur} → 최신 v{EXT_MIN_VERSION}) — 이번 조회는 그대로 진행합니다")
+    messagebox.showwarning(
+        "에어부산 확장 업데이트 필요",
+        f"크롬에 설치된 'DH 조회 도우미'가 구버전입니다.\n"
+        f"(현재 v{cur} → 최신 v{EXT_MIN_VERSION})\n\n"
+        "이번 조회는 그대로 진행됩니다. 조회가 끝난 뒤 업데이트해주세요.\n\n"
+        "업데이트 방법:\n"
+        "  1. NAS의 'DH조회_확장' 폴더 내용을 PC에 복사해둔 폴더에 덮어쓰기\n"
+        "  2. 크롬 주소창에 chrome://extensions 입력\n"
+        "  3. 'DH 조회 도우미' 카드의 새로고침(↻) 버튼 클릭\n\n"
+        f"NAS: {NAS_PATH}"
+    )
+
+
 async def setup_bx_extension(chrome_exe):
     """에어부산 건이 있을 때 조회 시작 전에 1회: 창구 열기 → 크롬에 에어부산 열기 → 확장 동작 확인"""
     EXT.chrome_exe = chrome_exe
@@ -1762,6 +1844,7 @@ async def setup_bx_extension(chrome_exe):
             if EXT.seen_recently(5):
                 EXT.available = True
                 print("✅ 에어부산 확장 연결 확인 — 에어부산은 크롬에서 자동 조회합니다\n")
+                _warn_if_old_extension()
                 return
             await asyncio.sleep(0.5)
         retry = messagebox.askretrycancel(
@@ -2567,7 +2650,7 @@ async def main():
     print(f"⚠️  불일치       : {mismatch}건  ← 즉시 확인!")
     print(f"❌ 예약없음      : {no_rsv}건   ← 즉시 확인!")
     print(f"❌ PNR오류       : {pnr_err}건  ← 즉시 확인!")
-    print(f"⚠️  수동확인필요  : {manual}건  ← 파라타항공 직접 조회 필요!")
+    print(f"⚠️  수동확인필요  : {manual}건  ← [확인필요_요약] 시트에서 항공사 확인 후 직접 조회")
     print(f"💥 오류/재시도   : {error}건")
     if skipped:
         print(f"⬜ 미조회        : {skipped}건  ← 중단되어 조회 못함, 재실행 필요!")
