@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import random
 import re
 import logging
@@ -24,7 +25,7 @@ try:
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.20.0"
+__version__ = "3.21.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
 
@@ -53,10 +54,10 @@ NAS_PATH = (
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 결과가 엑셀의 정확한 행에 기록되도록 수정 (왕복 등 같은 예약번호 행이 섞이던 문제)\n"
-    "  - PNR 빈칸·형식 오류 행을 건너뛰지 않고 [확인필요_요약]에 표시\n"
-    "  - 한 항공사에서 3건 연속 실패하면 그 항공사는 멈추고 나머지 항공사만 계속 조회\n"
-    "  - 실패 화면을 이 PC에 자동 저장 (7일 후 자동 삭제)"
+    "  - 매크로를 다시 돌려도 내용이 그대로이고 최근 3일 안에 확인된 건은 다시 조회하지 않음\n"
+    "    (출발 3일 이내 건은 항상 다시 조회)\n"
+    "  - 에어부산 확장 v1.2.0: 탭을 뒤로 보내도 느려지지 않고, 보안확인으로 끊긴 건을 재조회\n"
+    "    → 확장 업데이트 안내가 뜨면 안내대로 한 번만 업데이트해주세요"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -75,6 +76,13 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.21.0 (2026-11-04) — 재조회 줄이기 + 확장 v1.2.0
+#   - 매크로가 [검증대상] 시트를 지우고 다시 만들기 때문에 시트의 이전 결과만으로는
+#     재실행 시 전부 다시 조회했음 → 이 PC에 조회 기록(해시만 저장, 이름·PNR 원문 없음)을 남겨
+#     항공사·PNR·이름·구간·출발시간이 그대로고 최근 RECHECK_DAYS일 안에 확인완료면 건너뜀.
+#     취소·변경을 놓치지 않도록 출발 RECHECK_NEAR_DEP_DAYS일 이내면 항상 재조회
+#   - 확장 v1.2.0 (v1.1.0 기반): 뒤로 간 탭의 대기를 background에 위임,
+#     조회 중 보안확인이 끼어들면 PNR오류 대신 타임아웃으로 표시
 # v3.20.0 (2026-11-04) — 코드 점검 반영 (버그 수정·중복 제거·진단 기능)
 #   - 결과 기록을 (PNR,항공사,이름) 키 → 엑셀 행 번호 기준으로 변경.
 #     같은 키가 여러 행이면 마지막 결과로 덮이고, 조회 범위 밖 행에도 기록되던 문제 수정.
@@ -504,6 +512,10 @@ SHOT_DIR = os.path.expanduser(r"~\AppData\Local\DH_checker_screens")
 SHOT_KEEP_DAYS = 7
 _shot_count = 0
 _silent_save_warned = False
+# 조회 기록 — 항공사가 예약을 바꿀 수 있으므로 기간을 짧게 둠 (운영 판단값, 규정 수치 아님)
+HISTORY_PATH = os.path.expanduser(r"~\AppData\Local\DH_checker_history.json")
+RECHECK_DAYS = 3            # 확인 후 이 기간이 지나면 다시 조회
+RECHECK_NEAR_DEP_DAYS = 3   # 출발까지 이 기간 이내면 기록이 있어도 항상 다시 조회
 
 
 def _split_eng(eng_name):
@@ -655,7 +667,8 @@ def ask_resume(done_count, total_count):
             f"이미 조회가 끝난 건이 {done_count}건 있습니다.\n"
             f"(전체 {total_count}건 중)\n\n"
             "건너뛰고 나머지만 조회하면 시간을 크게 줄일 수 있습니다.\n"
-            "※ 오류·불일치·미조회 건은 건너뛰지 않고 다시 조회합니다.\n\n"
+            "※ 오류·불일치·미조회 건은 건너뛰지 않고 다시 조회합니다.\n"
+            f"※ 출발 {RECHECK_NEAR_DEP_DAYS}일 이내 건은 지난 기록으로 건너뛰지 않습니다.\n\n"
             "어떻게 할까요?"
         ),
         justify="left", padx=20, pady=15
@@ -909,6 +922,55 @@ def _write_summary_sheet(wb, targets):
     for col, width in zip("ABCDE", (12, 12, 10, 15, 40)):
         ws_summary.column_dimensions[col].width = width
     return error_count
+
+
+def _history_key(target):
+    """행 내용이 하나라도 바뀌면 달라지는 키. 파일에 이름·PNR이 남지 않도록 해시만 저장"""
+    raw = "|".join(target[k] for k in ("airline", "pnr", "kor_name", "dep", "arr", "dep_time"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_history(now):
+    """조회 기록 읽기 (없거나 깨졌으면 빈 기록). 유효기간이 지난 항목은 버림"""
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            k: v for k, v in data.items()
+            if now - datetime.fromisoformat(v["checked"]) < timedelta(days=RECHECK_DAYS)
+        }
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logging.warning(f"조회 기록 읽기 실패 → 전체 조회: {e}")
+        return {}
+
+
+def _reusable_entry(history, target, now):
+    """재조회를 생략해도 되는 기록이면 반환. 출발일을 모르거나 출발이 임박하면 None"""
+    entry = history.get(_history_key(target))
+    dep_date = parse_dep_date(target["dep_time"])
+    if not entry or not dep_date:
+        return None
+    if (dep_date.date() - now.date()).days <= RECHECK_NEAR_DEP_DAYS:
+        return None
+    return entry
+
+
+def _record_history(history, target, now):
+    """확인완료만 기록. 다른 결과가 나오면 이전 기록을 지워 다음 실행에서 다시 조회되게 함"""
+    key = _history_key(target)
+    if "확인완료" in str(target["result"]):
+        history[key] = {"result": target["result"], "detail": target["detail"], "checked": now.isoformat()}
+    else:
+        history.pop(key, None)
+    tmp = HISTORY_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+        os.replace(tmp, HISTORY_PATH)
+    except Exception as e:
+        logging.warning(f"조회 기록 저장 실패: {e}")
 
 
 def _atomic_save(wb, path):
@@ -1680,7 +1742,7 @@ async def check_tw(page, target):
 # ==========================================
 EXT_PORT = 38517
 # (v3.19.0) 이 버전보다 낮은 확장이 연결되면 업데이트 안내 (실행은 계속)
-EXT_MIN_VERSION = "1.1.0"
+EXT_MIN_VERSION = "1.2.0"
 
 
 class _ExtBridge:
@@ -1900,6 +1962,8 @@ async def check_bx_ext(page, target):
             if text is not None:
                 if text == "__FIELD_NOT_FOUND__":
                     return "💥 오류", "확장: 입력칸을 찾지 못함 (에어부산 화면 변경 가능성)"
+                if text == "__CF_INTERRUPTED__":
+                    return "⏱️ 타임아웃", "보안확인으로 조회가 끊김 → 재조회 필요"
                 if "해당 예약번호가 확인되지 않습니다" in text:
                     return "❌ PNR오류", "해당 예약번호 확인 불가"
                 return _parse_bx_text(text, target, pnr)
@@ -2277,12 +2341,26 @@ async def main():
         return
 
     # ── 이미 조회 완료된 건이 있으면 이어서 할지 확인 ──
-    done_targets = [t for t in targets if "확인완료" in t["prev_result"] and not t.get("skipped")]
+    # 시트에 남은 결과(중단 후 이어서) + 이 PC의 조회 기록(매크로로 시트를 다시 만든 경우)
+    now = datetime.now(KST)
+    history = _load_history(now)
+    done_targets = []
+    for t in targets:
+        if t.get("skipped"):
+            continue
+        entry = None if "확인완료" in t["prev_result"] else _reusable_entry(history, t, now)
+        if "확인완료" in t["prev_result"]:
+            t["reuse"] = (t["prev_result"], t["prev_detail"])
+        elif entry:
+            checked = datetime.fromisoformat(entry["checked"]).strftime("%m/%d")
+            t["reuse"] = (entry["result"], f"[이전확인 {checked} KST] {entry['detail']}")
+        else:
+            continue
+        done_targets.append(t)
     if done_targets:
         if ask_resume(len(done_targets), queryable):
             for t in done_targets:
-                t["result"] = t["prev_result"]
-                t["detail"] = t["prev_detail"]
+                t["result"], t["detail"] = t["reuse"]
                 t["skipped"] = True
             print(f"⏭  이미 완료된 {len(done_targets)}건은 건너뜁니다. "
                   f"(남은 조회: {queryable - len(done_targets)}건)\n")
@@ -2508,6 +2586,7 @@ async def main():
             update_progress_window(progress_state, i, pending_total, target, result)
 
             if not tripped:
+                _record_history(history, target, datetime.now(KST))
                 if "타임아웃" in result or "💥" in result:
                     fail_streak[airline] += 1
                     if fail_streak[airline] == MAX_FAIL_STREAK:
