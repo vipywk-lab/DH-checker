@@ -10,35 +10,53 @@ import threading
 import time
 import uuid
 import webbrowser
-from datetime import datetime, timedelta
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from urllib.parse import quote
 import openpyxl
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
-# Patchright(자동화 흔적을 브라우저 내부에서 제거한 Playwright 호환판)가 설치돼 있으면 우선 사용
-# — 에어부산 보안확인이 체크해도 무한반복되는 문제 대응 (v3.15.0). 없으면 기존 Playwright
-try:
-    from patchright.async_api import async_playwright, TimeoutError as PWTimeout
-    PATCHRIGHT = True
-except ImportError:
-    from playwright.async_api import async_playwright, TimeoutError as PWTimeout
-    PATCHRIGHT = False
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 try:
     from playwright_stealth import Stealth
-    STEALTH_AVAILABLE = not PATCHRIGHT  # Patchright 사용 시 stealth 병행 금지(충돌)
+    STEALTH_AVAILABLE = True
 except ImportError:
     STEALTH_AVAILABLE = False
 
-__version__ = "3.19.0"
+__version__ = "3.20.0"
 VERSION_URL = "https://raw.githubusercontent.com/vipywk-lab/DH-checker/main/bx_checker.py"
-NAS_PATH    = r"\\10.223.120.38\종합통제\24. 승무계획팀\29.자동화\DH 조회 자동화"
 GITHUB_URL  = "https://github.com/vipywk-lab/DH-checker"
+
+
+def _read_env(path):
+    """.env의 KEY=VALUE 읽기. 파일이 없거나 읽지 못하면 빈 값 (조회 기능과 무관한 설정만 보관)"""
+    values = {}
+    try:
+        # utf-8-sig: 메모장에서 저장해 BOM이 붙은 파일도 읽기 위함
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key.strip()] = value.strip().strip("\"'")
+    except (OSError, UnicodeDecodeError):
+        pass
+    return values
+
+
+# 사내 NAS 주소는 공개 저장소에 올리지 않도록 .env로 분리. 없으면 업데이트 안내에 일반 문구 표시
+NAS_PATH = (
+    _read_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")).get("NAS_PATH")
+    or "승무계획팀 NAS 자동화 폴더"
+)
 
 # 실행 시 콘솔에 표시되는 이번 버전 변경사항 (유저용 — 기술 용어 지양, 짧게)
 LATEST_CHANGELOG = (
-    "  - 에어부산 확장이 구버전이면 실행 시 업데이트 안내 (조회는 그대로 진행)\n"
-    "  - 30일 지난 결과백업 파일 자동 정리\n"
-    "  - 에어부산 확장 연동 창구 보안 강화, 오류 기록 범위 확대\n"
-    "  - 조회 끝 요약의 '수동확인필요' 안내 문구 수정"
+    "  - 결과가 엑셀의 정확한 행에 기록되도록 수정 (왕복 등 같은 예약번호 행이 섞이던 문제)\n"
+    "  - PNR 빈칸·형식 오류 행을 건너뛰지 않고 [확인필요_요약]에 표시\n"
+    "  - 한 항공사에서 3건 연속 실패하면 그 항공사는 멈추고 나머지 항공사만 계속 조회\n"
+    "  - 실패 화면을 이 PC에 자동 저장 (7일 후 자동 삭제)"
 )
 
 # 클라우드플레어 감지 키워드 (전역 — 모든 항공사 조회 함수에서 공유)
@@ -57,6 +75,32 @@ def _is_reliable_result(flt_found, route_found):
 
 # ==========================================
 # 체인지로그
+# v3.20.0 (2026-11-04) — 코드 점검 반영 (버그 수정·중복 제거·진단 기능)
+#   - 결과 기록을 (PNR,항공사,이름) 키 → 엑셀 행 번호 기준으로 변경.
+#     같은 키가 여러 행이면 마지막 결과로 덮이고, 조회 범위 밖 행에도 기록되던 문제 수정.
+#     아직 조회 안 한 건(None)이 중간 저장 때 기존 결과를 지우던 문제도 함께 해결
+#   - 이름 앞뒤 공백이 있으면 결과가 기록되지 않던 문제 수정 (읽을 때 strip)
+#   - PNR 빈칸·6자리 아님 행을 조용히 버리지 않고 "❌ PNR오류"로 표시
+#   - .xlsx 저장이 매크로 형식으로 기록돼 Excel에서 열리지 않던 문제 수정 (백업 파일 포함)
+#   - 중간 저장 시 파일 읽기 실패가 조회 전체를 중단시키던 문제 수정, 저장 실패 시 1회 안내
+#   - 저장을 임시 파일 → 교체 방식으로 변경 (저장 중 전원 차단 시 엑셀 손상 방지)
+#   - 확장 창구 포트 이중 바인딩 차단 (윈도우에서 프로그램 2개 동시 실행을 감지 못 하던 문제)
+#   - 조회 탭 하나만 닫혀도 남은 건 전부 미조회 처리되던 문제 수정 (브라우저가 살아있으면 계속)
+#   - 대한항공·파라타: 보안확인 화면을 PNR오류로 잘못 표시하던 문제 수정
+#   - 진에어·제주항공: 달력 선택 실패를 PNR오류 대신 수동확인필요로 표시
+#   - 영문명에 "/"가 없을 때 영문 성 + 한글 이름으로 섞여 입력되던 문제 수정
+#   - 수동확인 안내 화면의 한글 깨짐 수정 (data URL charset 누락)
+#   - 대한항공 구간 파싱: 한글이 바로 붙은 공항코드도 인식 (\b → 전후방 탐색)
+#   - bare except → except Exception (Ctrl+C가 삼켜지던 문제)
+#   - 추가: 기본 타임아웃 20초 명시, 실패 화면 스크린샷(%LOCALAPPDATA%, 7일 보관),
+#     항공사별 연속 3회 실패 시 조회 중단
+#   - 개인정보: 로그·백업 파일에서 이름 제거, 콘솔 이메일 출력 제거
+#   - 사내 NAS 경로를 코드에서 빼고 .env로 분리 (공개 저장소 노출 방지)
+#   - 항공사별 중복 코드를 공용 함수로 통합, 모듈 로드 시 부수효과 제거(_bootstrap)
+# v3.19.1 (2026-11-01) — 대한항공·진에어·제주항공·파라타 조회 방식 통일
+#   - PC에 따라 조회 방식이 달라지던 것을 모든 PC에서 같은 방식으로 정리
+#   - (v3.15.0에서 에어부산 보안확인 대응용으로 넣었던 선택 사항 제거 —
+#     에어부산은 v3.18.0부터 확장 프로그램으로 조회하므로 더 이상 필요 없음)
 # v3.19.0 (2026-10-16) — 코드 점검 반영
 #   - [보안] 확장 연동 창구(127.0.0.1:38517)가 "아무 사이트나 읽어도 됨"(CORS *)으로
 #     응답하던 것 제거 + 웹사이트에서 온 요청(Origin 헤더 있음)은 403 거부.
@@ -298,24 +342,22 @@ def _is_reliable_result(flt_found, route_found):
 # ==========================================
 # Playwright Chromium 최초 1회 자동 설치
 # ==========================================
+def _ver_tuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except Exception:
+        return (0,)
+
+
 def check_for_update():
     """GitHub raw URL에서 최신 버전 확인 — 구버전이면 실행 차단"""
     import urllib.request
     try:
         with urllib.request.urlopen(VERSION_URL, timeout=5) as resp:
-            found_version = False
             for line in resp.read().decode("utf-8").splitlines():
                 if line.startswith("__version__"):
-                    found_version = True
                     latest = line.split("=")[1].strip().strip('"').strip("'")
-
-                    def _ver(v):
-                        try:
-                            return tuple(int(x) for x in v.split("."))
-                        except Exception:
-                            return (0,)
-
-                    if _ver(latest) > _ver(__version__):
+                    if _ver_tuple(latest) > _ver_tuple(__version__):
                         print(f"\n{'!'*50}")
                         print(f"  ⚠️  업데이트 필요: 현재 v{__version__} → 최신 v{latest}")
                         print(f"  최신 파일로 교체가 필요합니다. 아래 둘 중 하나로 받아주세요.")
@@ -324,22 +366,20 @@ def check_for_update():
                         print(f"{'!'*50}\n")
                         input("업데이트 후 다시 실행해주세요. 엔터 누르면 종료...")
                         raise SystemExit("구버전 실행 차단")
-                    else:
-                        print(f"✅ 최신 버전입니다 (v{__version__})")
+                    print(f"✅ 최신 버전입니다 (v{__version__})")
                     return
             # 파일은 받았으나 __version__ 줄을 못 찾은 경우 (포맷 변경 등)
-            if not found_version:
-                print("⚠️  버전 정보를 확인하지 못했습니다 (버전 체크 건너뜀)\n")
+            print("⚠️  버전 정보를 확인하지 못했습니다 (버전 체크 건너뜀)\n")
     except SystemExit:
         raise
     except Exception:
         print("⚠️  버전 확인 실패 (네트워크 연결 없음 — 무시하고 계속 진행)\n")
 
 
-check_for_update()
-
-chromium_path = os.path.expanduser("~\\AppData\\Local\\ms-playwright")
-if not os.path.exists(chromium_path):
+def _ensure_browser_installed():
+    chromium_path = os.path.expanduser("~\\AppData\\Local\\ms-playwright")
+    if os.path.exists(chromium_path):
+        return
     print("기반 시스템(브라우저)을 설치 중입니다. 최초 1회만 진행되며 시간이 조금 걸릴 수 있습니다...")
     try:
         # sys.executable(현재 실행 중인 파이썬 경로)로 모듈 호출 → PATH에 의존하지 않음
@@ -356,23 +396,17 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(SCRIPT_DIR, f"에러로그_{datetime.now().strftime('%Y%m%d')}.txt")
 # 조회 결과 원본 백업 (엑셀 손상 시 복구용) — 실행할 때마다 새 파일
 JSONL_PATH = os.path.join(SCRIPT_DIR, f"결과백업_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
-logging.basicConfig(
-    filename=LOG_PATH,
-    level=logging.WARNING,   # (v3.19.0) 경고도 기록 — 확장·크롬 연결 문제 원인 추적용
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    encoding='utf-8'
-)
 
 
 
-def _cleanup_old_backups(days=30):
-    """(v3.19.0) 실행마다 생기는 결과백업_*.jsonl 중 30일 지난 것 자동 삭제 (실패해도 무시)"""
+def _cleanup_old_files(folder, prefix, suffix, days, label):
+    """오래된 파일 자동 삭제 (실패해도 무시). 지운 게 있을 때만 안내"""
     cutoff = time.time() - days * 86400
     removed = 0
     try:
-        for name in os.listdir(SCRIPT_DIR):
-            if name.startswith("결과백업_") and name.endswith(".jsonl"):
-                path = os.path.join(SCRIPT_DIR, name)
+        for name in os.listdir(folder):
+            if name.startswith(prefix) and name.endswith(suffix):
+                path = os.path.join(folder, name)
                 try:
                     if os.path.getmtime(path) < cutoff:
                         os.remove(path)
@@ -382,23 +416,40 @@ def _cleanup_old_backups(days=30):
     except Exception:
         pass
     if removed:
-        print(f"🧹 {days}일 지난 결과백업 파일 {removed}개를 정리했습니다.")
+        print(f"🧹 {days}일 지난 {label} {removed}개를 정리했습니다.")
 
 
-_cleanup_old_backups()
+# _bootstrap()에서 설정 — 모듈을 import만 할 때(테스트 등)는 창·네트워크·파일 동작이 없도록 분리
+root = None
+EXCEL_PATH = None
 
-root = tk.Tk()
-root.withdraw()
-messagebox.showinfo("안내", "xlsm 파일을 선택해주세요")
-EXCEL_PATH = filedialog.askopenfilename(
-    title="xlsm 파일 선택",
-    filetypes=[("Excel files", "*.xlsm *.xlsx")],
-    # (v3.18.2) 항상 프로그램이 있는 폴더에서 시작 — 지정 안 하면 윈도우가 이 PC에서
-    # 마지막으로 열었던 폴더를 보여줘서, 공용 PC에선 다른 사람이 쓰던 폴더가 뜸
-    initialdir=SCRIPT_DIR,
-)
-if not EXCEL_PATH:
-    raise SystemExit("파일을 선택하지 않았습니다.")
+
+def _bootstrap():
+    """실행 시 1회: 버전 확인 → 브라우저 설치 → 로그 설정 → 오래된 파일 정리 → 엑셀 선택"""
+    global root, EXCEL_PATH
+    check_for_update()
+    _ensure_browser_installed()
+    logging.basicConfig(
+        filename=LOG_PATH,
+        level=logging.WARNING,   # (v3.19.0) 경고도 기록 — 확장·크롬 연결 문제 원인 추적용
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        encoding='utf-8'
+    )
+    _cleanup_old_files(SCRIPT_DIR, "결과백업_", ".jsonl", 30, "결과백업 파일")
+    _cleanup_old_files(SHOT_DIR, "", ".png", SHOT_KEEP_DAYS, "실패 화면")
+
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showinfo("안내", "xlsm 파일을 선택해주세요")
+    EXCEL_PATH = filedialog.askopenfilename(
+        title="xlsm 파일 선택",
+        filetypes=[("Excel files", "*.xlsm *.xlsx")],
+        # (v3.18.2) 항상 프로그램이 있는 폴더에서 시작 — 지정 안 하면 윈도우가 이 PC에서
+        # 마지막으로 열었던 폴더를 보여줘서, 공용 PC에선 다른 사람이 쓰던 폴더가 뜸
+        initialdir=SCRIPT_DIR,
+    )
+    if not EXCEL_PATH:
+        raise SystemExit("파일을 선택하지 않았습니다.")
 
 SHEET_NAME = "검증대상"
 RESULT_COL = 8
@@ -415,6 +466,8 @@ WE_URL     = "https://www.parataair.com/ko/login/viewLogin.do?tab=2#"
 TW_URL     = "https://www.twayair.com/app/reservation/searchMemberBooking"
 JJ_URL     = "https://www.jejuair.net/ko/ibe/mypage/viewOnOffReservationList.do"
 
+AIRLINES = ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공")
+
 # 국내/국제선 공항코드 (전역 — 여러 항공사 조회 함수에서 공유)
 AIRPORT_CODES = (
     r'PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
@@ -422,11 +475,96 @@ AIRPORT_CODES = (
     r'|DAD|SGN|HAN|CXR|PQC|CEB|KLO|TAG|MNL'
     r'|TPE|HKG|MFM|SIN|DPS|GUM'
 )
+BX_AIRPORT_CODES = (
+    r'PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+    r'|FUK|KIX|CTS|NRT|HND|NGO'
+    r'|DAD|CXR|TAG|CEB|KLO|VTE|CNX'
+    r'|TPE|KHH|HKG|MFM|TAO|YNJ|DYG|XIY|PVG'
+)
+KE_AIRPORT_CODES = (
+    r'PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
+    r'|NRT|HND|KIX|NGO|FUK|CTS|OKA'
+    r'|BKK|CNX|HKT|SGN|HAN|DAD|CXR|MNL|CEB|CRK'
+    r'|TPE|HKG|MFM|SIN|KUL|PNH|REP|VTE|RGN|DPS|PQC'
+    r'|PEK|PVG|CAN|TAO|SZX|WEH|YNJ|HRB|SHE'
+)
+WE_AIRPORT_CODES = r'PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX|PQC|RGN|DPS|MFM|HKG'
 HEADLESS   = False
-DELAY_MIN  = 1.0
-DELAY_MAX  = 2.0
 
 DOMESTIC_AIRPORTS = {"PUS","CJU","TAE","CJJ","HIN","RSU","KPO","MWX","GMP","ICN"}
+
+KST = timezone(timedelta(hours=9))
+# 개별 호출에 timeout을 안 준 동작(fill 등)에 적용되는 기본 대기 시간
+DEFAULT_TIMEOUT_MS = 20000
+# 한 항공사가 연속으로 이만큼 타임아웃·오류면 그 항공사 조회를 멈춤 (사이트 변경·차단 시 헛조회 방지)
+MAX_FAIL_STREAK = 3
+# 실패 화면 스크린샷 — 예약 정보가 찍힐 수 있으므로 공유 폴더(NAS·드라이브)가 아닌 이 PC 안에만 저장
+SAVE_FAILURE_SHOTS = True
+SHOT_DIR = os.path.expanduser(r"~\AppData\Local\DH_checker_screens")
+SHOT_KEEP_DAYS = 7
+_shot_count = 0
+_silent_save_warned = False
+
+
+def _split_eng(eng_name):
+    """'HONG/GILDONG' → ('HONG', 'GILDONG'). 성·이름이 다 없으면 None (한글 이름과 섞어 입력 방지)"""
+    parts = [p.strip() for p in str(eng_name or "").split("/")]
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return parts[0], parts[1]
+    return None
+
+
+def _input_name(target):
+    """조회 입력 이름 규칙: 국제선 + 영문명 있음 → 영문, 그 외 → 한글"""
+    eng = _split_eng(target.get("eng_name", ""))
+    if eng and is_international(target["dep"], target["arr"]):
+        return eng
+    return target["last"], target["first"]
+
+
+def _is_cf_page(text):
+    return any(kw in text for kw in CF_KEYWORDS)
+
+
+def _html_url(html):
+    """한글이 깨지지 않는 안내 화면용 data URL"""
+    return "data:text/html;charset=utf-8," + quote(html)
+
+
+def _route_from_codes(text, codes):
+    """화면 글자에서 처음 나온 공항코드 2개 → 'PUS→GMP'. 한글이 바로 붙어도 인식 (푸꾸옥PQC서울)"""
+    found = re.findall(rf'(?<![A-Z0-9])({codes})(?![A-Z0-9])', text)
+    return f"{found[0]}→{found[1]}" if len(found) >= 2 else "구간미확인"
+
+
+def _dot_departure_date(text):
+    """
+    'YYYY.MM.DD(요일)' 형식 화면(진에어·제주항공)의 출발일.
+    예약일이 출발일보다 먼저 나오므로 2번째 값을 사용 (1개뿐이면 그 값)
+    """
+    dates = re.findall(r'(\d{4})\.(\d{2})\.(\d{2})\(', text)
+    if not dates:
+        return "날짜미확인"
+    y, m, d = dates[1] if len(dates) >= 2 else dates[0]
+    return f"{y}-{m}-{d}"
+
+
+def _verdict(flt_found, date_found, route_found, dep_date):
+    """편명·날짜·구간 파싱 결과 → (결과, 상세). 전 항공사 공통 판정"""
+    detail = f"{flt_found} | {date_found} | {route_found}"
+    if dep_date and date_found != "날짜미확인":
+        try:
+            site_date = datetime.strptime(date_found, "%Y-%m-%d")
+            if dep_date.date() != site_date.date():
+                return "⚠️ 불일치", (
+                    f"{detail} | 날짜불일치(PDC:{dep_date.strftime('%m/%d')}"
+                    f" vs 사이트:{site_date.strftime('%m/%d')})"
+                )
+        except ValueError:
+            pass
+    if not _is_reliable_result(flt_found, route_found):
+        return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
+    return "✅ 확인완료", detail
 
 
 def create_progress_window(total):
@@ -480,7 +618,7 @@ def update_progress_window(state, i, total, target, result):
 
         state["bar"]["value"] = i
         state["count"].config(text=f"{i} / {total}건")
-        state["current"].config(text=f"방금 조회: {target['kor_name']} ({target['airline']}) → {result}")
+        state["current"].config(text=f"방금 조회: {target['row']}행 {target['kor_name']} ({target['airline']}) → {result}")
         state["summary"].config(
             text=f"확인완료 {state['n_ok']} | 불일치 {state['n_mismatch']} | 오류·기타 {state['n_other']}"
         )
@@ -611,19 +749,16 @@ def split_korean_name(name):
 
 def parse_dep_date(dep_time_str):
     s = str(dep_time_str).strip()
-    try:
-        return datetime.strptime(s[:7], "%d%b%y")
-    except:
-        pass
-    try:
-        return datetime.strptime(s[:9], "%d-%b-%y")
-    except:
-        pass
+    for text, fmt in ((s[:7], "%d%b%y"), (s[:9], "%d-%b-%y")):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            pass
     try:
         n = float(s)
         if 40000 < n < 60000:
             return datetime(1899, 12, 30) + timedelta(days=int(n))
-    except:
+    except ValueError:
         pass
     return None
 
@@ -639,8 +774,17 @@ def is_international(dep, arr):
     return dep not in DOMESTIC_AIRPORTS or arr not in DOMESTIC_AIRPORTS
 
 
+def _open_wb(path):
+    """keep_vba는 xlsm에만 — xlsx에 쓰면 매크로 형식으로 저장돼 Excel에서 열리지 않음"""
+    return openpyxl.load_workbook(path, keep_vba=path.lower().endswith(".xlsm"))
+
+
+def _cell_text(value):
+    return str(value).strip() if value is not None else ""
+
+
 def load_targets(path, sheet, start_date, end_date):
-    wb = openpyxl.load_workbook(path, keep_vba=True)
+    wb = _open_wb(path)
     if sheet not in wb.sheetnames:
         messagebox.showerror(
             "시트 없음",
@@ -653,26 +797,26 @@ def load_targets(path, sheet, start_date, end_date):
         raise SystemExit(f"[{sheet}] 시트 없음 → 프로그램 종료")
     ws = wb[sheet]
     targets = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         vals = (list(row) + [None]*9)[:9]
-        kor_name, airline, pnr, dep, arr, dep_time, eng_name = vals[:7]
+        kor_name = _cell_text(vals[0])
+        airline  = _cell_text(vals[1])
+        pnr      = _cell_text(vals[2]).upper()
+        dep, arr, dep_time, eng_name = vals[3:7]
         prev_result, prev_detail = vals[7], vals[8]
-        if not all([kor_name, airline, pnr]):
-            continue
-        if airline not in ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공"):
-            continue
-        if not re.match(r'^[A-Z0-9]{6}$', str(pnr).strip().upper()):
+        if not kor_name or airline not in AIRLINES:
             continue
         if not is_within_check_range(str(dep_time or ""), start_date, end_date):
             continue
-        last, first = split_korean_name(str(kor_name))
-        targets.append({
-            "kor_name": str(kor_name),
-            "airline" : str(airline),
+        last, first = split_korean_name(kor_name)
+        target = {
+            "row"     : row_idx,
+            "kor_name": kor_name,
+            "airline" : airline,
             "last"    : last,
             "first"   : first,
             "eng_name": str(eng_name).strip().replace("-", " ") if eng_name else "",
-            "pnr"     : str(pnr).strip().upper(),
+            "pnr"     : pnr,
             "dep"     : str(dep or ""),
             "arr"     : str(arr or ""),
             "dep_time": str(dep_time or ""),
@@ -680,7 +824,13 @@ def load_targets(path, sheet, start_date, end_date):
             "detail"  : None,
             "prev_result": str(prev_result) if prev_result else "",
             "prev_detail": str(prev_detail) if prev_detail else "",
-        })
+        }
+        # 빈칸·형식 오류 PNR은 조회할 수 없지만, 조용히 버리면 확인된 줄로 오해하므로 결과에 표시
+        if not re.match(r'^[A-Z0-9]{6}$', pnr):
+            target["result"]  = "❌ PNR오류"
+            target["detail"]  = "PNR 빈칸" if not pnr else "PNR 형식 오류 (영문·숫자 6자리 아님)"
+            target["skipped"] = True
+        targets.append(target)
     return targets
 
 
@@ -688,13 +838,14 @@ def _append_jsonl_backup(target):
     """
     조회 결과 한 건을 JSONL(한 줄에 하나씩) 형태로 즉시 남겨둠.
     엑셀이 동시접근/비정상종료 등으로 손상되더라도, 이 파일로 결과를 복구할 수 있음.
+    공유 폴더에 남는 파일이라 이름은 넣지 않음 (행 번호 + PNR로 복구).
     실패해도 조회 흐름을 막지 않도록 조용히 넘어감.
     """
     try:
         with open(JSONL_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "시각"   : datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "탑승객" : target.get("kor_name", ""),
+                "시각(KST)": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+                "행"     : target.get("row", ""),
                 "항공사" : target.get("airline", ""),
                 "PNR"   : target.get("pnr", ""),
                 "결과"   : target.get("result", ""),
@@ -704,58 +855,35 @@ def _append_jsonl_backup(target):
         pass
 
 
-def save_results(path, sheet, targets, silent=False):
-    """PNR 기반으로 정확하게 매칭해서 저장 + 확인필요 요약 시트 생성.
-
-    silent=True: 조회 도중 매 건마다 호출되는 "중간 저장" 모드.
-      - 결과 컬럼만 빠르게 기록하고, 무거운 요약시트 재생성은 생략.
-      - 파일이 열려있어 저장 실패해도 팝업 없이 조용히 넘어감(조회를 막지 않기 위함).
-        다음 건 처리 후 다시 저장을 시도하므로, 결국 파일이 닫히는 순간 반영됨.
-    silent=False(기본): 조회 종료 시 호출되는 "최종 저장". 요약시트 생성 +
-      파일이 열려있으면 팝업으로 안내하고 닫을 때까지 기다림(기존 동작 유지).
+def _apply_results(path, sheet, targets):
     """
-    wb = openpyxl.load_workbook(path, keep_vba=True)
+    엑셀을 다시 읽어 결과 칸을 채움 → (wb, 기록 못 한 건 목록).
+    읽을 때 기억한 행 번호로 기록하고, 그 행이 조회한 사람·PNR이 맞는지 한 번 더 확인
+    (조회 도중 시트가 바뀐 경우 엉뚱한 행에 쓰지 않기 위함). 아직 결과 없는 건은 건드리지 않음.
+    """
+    wb = _open_wb(path)
     ws = wb[sheet]
     ws.cell(1, RESULT_COL).value = "검증결과"
     ws.cell(1, DETAIL_COL).value = "조회내용"
 
-    # PNR + 항공사 + 이름 조합으로 정확히 매칭
-    result_map = {}
+    unmatched = []
     for t in targets:
-        key = (t["pnr"], t["airline"], t["kor_name"])
-        result_map[key] = (t["result"], t["detail"])
-
-    matched_keys = set()
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        airline  = row[1].value
-        pnr      = str(row[2].value).strip().upper() if row[2].value else ""
-        kor_name = str(row[0].value).strip() if row[0].value else ""
-        if airline not in ("에어부산", "대한항공", "진에어", "제주항공", "파라타항공", "티웨이항공"):
+        if t["result"] is None:
             continue
-        key = (pnr, airline, kor_name)
-        if key in result_map:
-            result, detail = result_map[key]
-            ws.cell(row_idx, RESULT_COL).value = result
-            ws.cell(row_idx, DETAIL_COL).value = detail
-            matched_keys.add(key)
+        same_row = (
+            _cell_text(ws.cell(t["row"], 1).value) == t["kor_name"]
+            and _cell_text(ws.cell(t["row"], 3).value).upper() == t["pnr"]
+        )
+        if same_row:
+            ws.cell(t["row"], RESULT_COL).value = t["result"]
+            ws.cell(t["row"], DETAIL_COL).value = t["detail"]
+        else:
+            unmatched.append(t)
+    return wb, unmatched
 
-    if silent:
-        # 중간 저장: 실패해도 조회 흐름을 막지 않도록 조용히 넘어감
-        try:
-            wb.save(path)
-        except Exception:
-            pass
-        return
 
-    # 조회는 했으나 엑셀 행과 매칭 안 된 건 경고 (이름/PNR이 조회 중 미묘하게 달라진 경우)
-    unmatched = [t for t in targets if (t["pnr"], t["airline"], t["kor_name"]) not in matched_keys]
-    if unmatched:
-        print(f"\n⚠️  결과 {len(unmatched)}건이 엑셀 행과 매칭되지 않아 기록 못 함:")
-        for t in unmatched:
-            print(f"     - {t['kor_name']} | {t['airline']} | {t['pnr']}")
-        print("   (엑셀 원본의 이름/PNR과 조회 데이터가 다른지 확인 필요)")
-
-    # ── 확인필요 요약 시트 생성 ──
+def _write_summary_sheet(wb, targets):
+    """확인필요 요약 시트 재생성 → 건수 반환"""
     summary_name = "확인필요_요약"
     if summary_name in wb.sheetnames:
         del wb[summary_name]
@@ -767,61 +895,102 @@ def save_results(path, sheet, targets, silent=False):
     error_count = 0
     for t in targets:
         res = str(t["result"])
-        if any(kw in res for kw in ["불일치", "예약없음", "PNR오류", "오류", "타임아웃", "수동확인필요", "미조회"]):
-            ws_summary.append([
-                t["kor_name"],
-                t["airline"],
-                t["pnr"],
-                t["result"],
-                t["detail"]
-            ])
+        if any(kw in res for kw in ["불일치", "예약없음", "오류", "타임아웃", "수동확인필요", "미조회"]):
+            ws_summary.append([t["kor_name"], t["airline"], t["pnr"], t["result"], t["detail"]])
             error_count += 1
 
     if error_count == 0:
         ws_summary.append(["✅ 모든 예약이 정상적으로 확인되었습니다!"])
     else:
-        # 헤더 볼드
         from openpyxl.styles import Font
         for cell in ws_summary[1]:
             cell.font = Font(bold=True)
 
-    ws_summary.column_dimensions["A"].width = 12
-    ws_summary.column_dimensions["B"].width = 12
-    ws_summary.column_dimensions["C"].width = 10
-    ws_summary.column_dimensions["D"].width = 15
-    ws_summary.column_dimensions["E"].width = 40
+    for col, width in zip("ABCDE", (12, 12, 10, 15, 40)):
+        ws_summary.column_dimensions[col].width = width
+    return error_count
 
-    # ── 저장 (엑셀 열려있으면 재시도/취소 안내, 취소 시 백업 파일로 저장) ──
+
+def _atomic_save(wb, path):
+    """임시 파일에 다 쓴 뒤 교체 — 저장 도중 꺼져도 원본이 깨지지 않음. 엑셀이 열려 있으면 교체에서 예외"""
+    tmp = path + ".tmp"
+    try:
+        wb.save(tmp)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
+
+def save_results(path, sheet, targets, silent=False):
+    """결과를 엑셀 행에 저장 + 확인필요 요약 시트 생성.
+
+    silent=True: 조회 도중 매 건마다 호출되는 "중간 저장" 모드.
+      - 결과 컬럼만 기록하고 요약시트는 생략.
+      - 실패해도 조회를 막지 않음 (1회만 콘솔 안내, 다음 건 처리 후 다시 시도).
+    silent=False(기본): 조회 종료 시 호출되는 "최종 저장". 요약시트 생성 +
+      실패하면 팝업으로 재시도/백업 저장 선택.
+    """
+    global _silent_save_warned
+    if silent:
+        try:
+            wb, _ = _apply_results(path, sheet, targets)
+            _atomic_save(wb, path)
+            _silent_save_warned = False
+        except Exception:
+            if not _silent_save_warned:
+                print("   ⚠️  중간 저장 실패 — 엑셀 파일을 닫아주세요 (닫으면 다음 건부터 자동 저장, 조회는 계속 진행)")
+                _silent_save_warned = True
+        return
+
+    wb = None
     while True:
         try:
-            wb.save(path)
+            wb, unmatched = _apply_results(path, sheet, targets)
+            # 조회는 했으나 엑셀 행이 달라진 건 경고 (조회 도중 시트를 수정·재생성한 경우)
+            if unmatched:
+                print(f"\n⚠️  결과 {len(unmatched)}건이 엑셀 행과 맞지 않아 기록 못 함:")
+                for t in unmatched:
+                    print(f"     - {t['row']}행 | {t['airline']} | {t['pnr']}")
+                print("   (조회 도중 시트를 수정했는지 확인 필요)")
+            error_count = _write_summary_sheet(wb, targets)
+            _atomic_save(wb, path)
             print(f"\n저장 완료: {path}")
             print(f"→ [확인필요_요약] 시트에서 {error_count}건 확인하세요!" if error_count > 0 else "→ 모든 예약 정상!")
-            break
+            return
         except Exception:
+            logging.warning("최종 저장 실패", exc_info=True)
             retry = messagebox.askretrycancel(
                 "저장 오류",
                 f"엑셀 파일이 열려있거나 저장할 수 없습니다!\n\n{path}\n\n"
                 f"[다시 시도] 파일을 닫고 다시 눌러주세요.\n"
                 f"[취소] 원본 대신 새 파일로 백업 저장합니다 (결과는 유실되지 않습니다)."
             )
-            if not retry:
-                folder = os.path.dirname(path)
-                stamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_path = os.path.join(folder, f"검증결과_백업_{stamp}.xlsx")
-                try:
-                    wb.save(backup_path)
-                    print(f"\n⚠️  원본 저장 실패 → 백업 파일로 저장했습니다:")
-                    print(f"   {backup_path}")
-                    messagebox.showinfo(
-                        "백업 저장 완료",
-                        f"원본 대신 아래 파일로 저장했습니다:\n\n{backup_path}\n\n"
-                        f"내용을 확인하고 원본 파일에 옮겨주세요."
-                    )
-                except Exception:
-                    print(f"\n💥 백업 저장도 실패했습니다. 로그 파일을 확인해주세요: {LOG_PATH}")
-                    logging.error("최종 저장 및 백업 저장 모두 실패", exc_info=True)
-                break
+            if retry:
+                continue
+            folder = os.path.dirname(path)
+            stamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # 확장자는 원본과 같게 — xlsm 내용을 .xlsx로 저장하면 Excel에서 열리지 않음
+            backup_path = os.path.join(folder, f"검증결과_백업_{stamp}{os.path.splitext(path)[1]}")
+            try:
+                if wb is None:
+                    raise RuntimeError("원본 파일을 읽지 못함")
+                wb.save(backup_path)
+                print(f"\n⚠️  원본 저장 실패 → 백업 파일로 저장했습니다:")
+                print(f"   {backup_path}")
+                messagebox.showinfo(
+                    "백업 저장 완료",
+                    f"원본 대신 아래 파일로 저장했습니다:\n\n{backup_path}\n\n"
+                    f"내용을 확인하고 원본 파일에 옮겨주세요."
+                )
+            except Exception:
+                print(f"\n💥 백업 저장도 실패했습니다. 결과는 여기 남아 있습니다: {JSONL_PATH}")
+                print(f"   로그 파일: {LOG_PATH}")
+                logging.error("최종 저장 및 백업 저장 모두 실패", exc_info=True)
+            return
 
 
 def _cdp_ready(port):
@@ -978,7 +1147,7 @@ def _reraise_if_closed(exc):
 def _parse_bx_text(html_content, target, pnr):
     """에어부산 결과 화면 텍스트 → (결과, 상세). 자동조회·확장조회 공용 (v3.18.0 분리)"""
     # 결과 파싱 전 클라우드플레어 재체크
-    if any(kw in html_content for kw in CF_KEYWORDS):
+    if _is_cf_page(html_content):
         return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
     if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "일치하는 예약"]):
         return "❌ 예약없음", "조회결과 없음"
@@ -1006,435 +1175,311 @@ def _parse_bx_text(html_content, target, pnr):
         route_found = route_match.group()
     else:
         # fallback: 공항코드로 매칭 (한글 도시명 미표시 대비)
-        codes = re.findall(
-            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
-            r'|FUK|KIX|CTS|NRT|HND|NGO'
-            r'|DAD|CXR|TAG|CEB|KLO|VTE|CNX'
-            r'|TPE|KHH|HKG|MFM|TAO|YNJ|DYG|XIY|PVG)(?![A-Z0-9])',
-            html_content
-        )
-        route_found = f"{codes[0]}→{codes[1]}" if len(codes) >= 2 else "구간미확인"
+        route_found = _route_from_codes(html_content, BX_AIRPORT_CODES)
 
     flt_found   = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
     date_found  = date_match.group() if date_match else "날짜미확인"
 
-    detail = f"{flt_found} | {date_found} | {route_found}"
-
-    dep_date = parse_dep_date(target["dep_time"])
-    mismatch = []
-    if dep_date and date_found != "날짜미확인":
-        try:
-            site_date = datetime.strptime(date_found, "%Y-%m-%d")
-            if dep_date.date() != site_date.date():
-                mismatch.append(
-                    f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                )
-        except:
-            pass
-
-    if mismatch:
-        return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-    if not _is_reliable_result(flt_found, route_found):
-        return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-    return "✅ 확인완료", detail
+    return _verdict(flt_found, date_found, route_found, parse_dep_date(target["dep_time"]))
 
 
-async def check_bx(page, target):
-    pnr      = target["pnr"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
+def _timeout_step(exc):
+    """타임아웃 오류에서 '어느 요소를 기다리다 실패했는지' 한 줄 추출 (사이트 화면 변경 진단용)"""
+    lines = str(exc).splitlines()
+    step = next((l.strip() for l in lines if "waiting for" in l), lines[0] if lines else "")
+    return step[:200]
 
-    intl = is_international(dep, arr)
 
-    if intl and eng_name:
-        parts = eng_name.split("/")
-        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        first = parts[1].strip() if len(parts) >= 2 else target["first"]
-    else:
-        last  = target["last"]
-        first = target["first"]
-
-    # 조회마다 새 탭 사용 — 이전 사람의 결과 화면이 남아있는 상태에서
-    # 이번 조회가 실패하면 그 잔류 화면을 잘못 읽어버리는 문제 방지
-    bx_page = await page.context.new_page()
+async def _save_failure_shot(tab, airline, target):
+    """실패 당시 화면 저장 (실패해도 조회에 영향 없음). 파일명에 이름·PNR 넣지 않음"""
+    global _shot_count
+    if not SAVE_FAILURE_SHOTS:
+        return
     try:
-        await bx_page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
-        await bx_page.wait_for_timeout(1000)
+        os.makedirs(SHOT_DIR, exist_ok=True)
+        stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+        await tab.screenshot(
+            path=os.path.join(SHOT_DIR, f"{stamp}KST_{airline}_{target['row']}행.png"),
+            timeout=5000,
+        )
+        _shot_count += 1
+    except Exception:
+        pass
 
-        # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
-        body_check = await bx_page.inner_text("body")
-        if any(kw in body_check for kw in CF_KEYWORDS):
-            print(f"\n{'='*50}")
-            print(f"  ⚠️  [에어부산] 클라우드플레어 보안 확인이 필요합니다!")
-            print(f"  → 열린 브라우저에서 '사람인지 확인하십시오' 체크박스를 클릭해주세요.")
-            print(f"  → 화면이 멈춘 것처럼 안 넘어가면 새로고침(F5)해주세요 — 자동으로도")
-            print(f"    주기적으로 새로고침을 시도합니다.")
-            print(f"  → 통과되면 자동으로 이어서 진행됩니다 (최대 3분 대기).")
-            print(f"{'='*50}")
+
+def airline_check(airline, new_tab=True, needs_date=False):
+    """
+    항공사 조회 함수 공통 처리: 조회마다 새 탭(직전 사람 화면이 남아 오판정되는 것 방지),
+    타임아웃·오류를 결과로 변환, 실패 시 스크린샷, 탭 정리.
+    브라우저가 닫힌 오류는 메인 루프가 판단하도록 다시 던짐.
+    """
+    def deco(flow):
+        @wraps(flow)
+        async def wrapper(page, target, *args):
+            if needs_date and not parse_dep_date(target["dep_time"]):
+                return "💥 오류", "출발일 파싱 실패"
+            tab = await page.context.new_page() if new_tab else page
             try:
-                await bx_page.bring_to_front()
-            except Exception:
-                pass
-            # 통과 여부 자동 감지 (v3.14.0: 콘솔로 돌아와 엔터 누를 필요 없음)
-            # (v3.16.2) 확인 화면이 멈춘 채로 안 넘어가는 경우가 있어 — 사람이 직접
-            # 새로고침하면 넘어가는 게 확인된 증상 → 30초마다 자동으로 새로고침도 시도
-            # (15초는 사람이 체크하는 도중에 새로고침돼 끊길 수 있어 v3.16.5에서 30초로)
-            # (사용자가 그 사이에 직접 체크박스를 누르고 있어도 문제 없음)
-            passed = False
-            for i in range(180):
-                await bx_page.wait_for_timeout(1000)
-                if i > 0 and i % 30 == 0:
+                try:
+                    result = await flow(tab, target, *args)
+                except PWTimeout as e:
+                    logging.warning(f"{airline} 타임아웃 | {target['row']}행 | {_timeout_step(e)}")
+                    result = ("⏱️ 타임아웃", "재시도 필요")
+                except Exception as e:
+                    _reraise_if_closed(e)
+                    logging.error(f"{airline} 조회 실패 | {target['row']}행", exc_info=True)
+                    result = ("💥 오류", "시스템 로그 확인 필요")
+                if not any(kw in result[0] for kw in ("확인완료", "수동확인")):
+                    await _save_failure_shot(tab, airline, target)
+                return result
+            finally:
+                if new_tab:
                     try:
-                        await bx_page.reload(wait_until="domcontentloaded", timeout=10000)
+                        await tab.close()
                     except Exception:
                         pass
-                try:
-                    body_check2 = await bx_page.inner_text("body")
-                except Exception:
-                    continue  # 새로고침/통과 직후 페이지 전환 중
-                if not any(kw in body_check2 for kw in CF_KEYWORDS):
-                    passed = True
-                    break
-            if not passed:
-                return "⏱️ 타임아웃", "클라우드플레어 차단 미해제 → 재실행 필요"
-            print("  ✅ 보안확인 통과 → 조회 계속")
-            await bx_page.wait_for_load_state("domcontentloaded")
+        return wrapper
+    return deco
+
+
+@airline_check("에어부산")
+async def check_bx(bx_page, target):
+    pnr = target["pnr"]
+    last, first = _input_name(target)
+
+    await bx_page.goto(BX_URL, wait_until="domcontentloaded", timeout=20000)
+    await bx_page.wait_for_timeout(1000)
+
+    # 클라우드플레어 감지 → 사람이 직접 캡챠 풀도록 안내
+    if _is_cf_page(await bx_page.inner_text("body")):
+        print(f"\n{'='*50}")
+        print(f"  ⚠️  [에어부산] 클라우드플레어 보안 확인이 필요합니다!")
+        print(f"  → 열린 브라우저에서 '사람인지 확인하십시오' 체크박스를 클릭해주세요.")
+        print(f"  → 화면이 멈춘 것처럼 안 넘어가면 새로고침(F5)해주세요 — 자동으로도")
+        print(f"    주기적으로 새로고침을 시도합니다.")
+        print(f"  → 통과되면 자동으로 이어서 진행됩니다 (최대 3분 대기).")
+        print(f"{'='*50}")
+        try:
+            await bx_page.bring_to_front()
+        except Exception:
+            pass
+        # 통과 여부 자동 감지 (v3.14.0: 콘솔로 돌아와 엔터 누를 필요 없음)
+        # (v3.16.2) 확인 화면이 멈춘 채로 안 넘어가는 경우가 있어 — 사람이 직접
+        # 새로고침하면 넘어가는 게 확인된 증상 → 30초마다 자동으로 새로고침도 시도
+        # (15초는 사람이 체크하는 도중에 새로고침돼 끊길 수 있어 v3.16.5에서 30초로)
+        # (사용자가 그 사이에 직접 체크박스를 누르고 있어도 문제 없음)
+        passed = False
+        for i in range(180):
             await bx_page.wait_for_timeout(1000)
-
-        await bx_page.click("text=예약번호로 조회", timeout=5000)
-        await bx_page.wait_for_timeout(500)
-
-        # Playwright의 fill()은 요소가 조작 가능해질 때까지 자동으로 기다리므로
-        # 입력 사이 고정 대기는 불필요 (v3.13.0에서 제거 — 조회 속도 개선)
-        await bx_page.locator("input[placeholder*='예약번호']").first.fill(pnr)
-        await bx_page.locator("input[placeholder='성']").first.fill(last)
-        await bx_page.locator("input[placeholder='이름']").first.fill(first)
-
-        await bx_page.evaluate("document.querySelector('.buttonOfflineCheckin').click()")
-        await bx_page.wait_for_timeout(1500)
-
-        body_text = await bx_page.inner_text("body")
-        if "해당 예약번호가 확인되지 않습니다" in body_text:
+            if i > 0 and i % 30 == 0:
+                try:
+                    await bx_page.reload(wait_until="domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
             try:
-                await bx_page.click("button:has-text('확인')", timeout=2000)
-            except:
-                pass
-            return "❌ PNR오류", "해당 예약번호 확인 불가"
+                body_check2 = await bx_page.inner_text("body")
+            except Exception:
+                continue  # 새로고침/통과 직후 페이지 전환 중
+            if not _is_cf_page(body_check2):
+                passed = True
+                break
+        if not passed:
+            return "⏱️ 타임아웃", "클라우드플레어 차단 미해제 → 재실행 필요"
+        print("  ✅ 보안확인 통과 → 조회 계속")
+        await bx_page.wait_for_load_state("domcontentloaded")
+        await bx_page.wait_for_timeout(1000)
 
+    await bx_page.click("text=예약번호로 조회", timeout=5000)
+    await bx_page.wait_for_timeout(500)
+
+    # Playwright의 fill()은 요소가 조작 가능해질 때까지 자동으로 기다리므로
+    # 입력 사이 고정 대기는 불필요 (v3.13.0에서 제거 — 조회 속도 개선)
+    await bx_page.locator("input[placeholder*='예약번호']").first.fill(pnr)
+    await bx_page.locator("input[placeholder='성']").first.fill(last)
+    await bx_page.locator("input[placeholder='이름']").first.fill(first)
+
+    await bx_page.evaluate("document.querySelector('.buttonOfflineCheckin').click()")
+    await bx_page.wait_for_timeout(1500)
+
+    body_text = await bx_page.inner_text("body")
+    if "해당 예약번호가 확인되지 않습니다" in body_text:
         try:
-            await bx_page.wait_for_selector("text=항공권 구매완료", timeout=10000)
-        except:
-            pass
-        await bx_page.wait_for_timeout(800)
-
-        html_content = await bx_page.inner_text("body")
-
-        return _parse_bx_text(html_content, target, pnr)
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        _reraise_if_closed(e)
-        logging.error(f"에어부산 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
-    finally:
-        try:
-            await bx_page.close()
+            await bx_page.click("button:has-text('확인')", timeout=2000)
         except Exception:
             pass
+        return "❌ PNR오류", "해당 예약번호 확인 불가"
+
+    try:
+        await bx_page.wait_for_selector("text=항공권 구매완료", timeout=10000)
+    except Exception:
+        pass
+    await bx_page.wait_for_timeout(800)
+
+    return _parse_bx_text(await bx_page.inner_text("body"), target, pnr)
 
 
-async def check_ke(page, target):
-    pnr      = target["pnr"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
-
+@airline_check("대한항공", needs_date=True)
+async def check_ke(ke_page, target):
+    pnr = target["pnr"]
     # 국내선=한글, 국제선=영문 (BX/LJ와 동일)
-    intl = is_international(dep, arr)
-    if intl and eng_name:
-        parts = eng_name.split("/")
-        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        first = parts[1].strip() if len(parts) >= 2 else target["first"]
-    else:
-        last  = target["last"]
-        first = target["first"]
-
+    last, first = _input_name(target)
     dep_date = parse_dep_date(target["dep_time"])
-    if not dep_date:
-        return "💥 오류", "출발일 파싱 실패"
 
-    ke_page = await page.context.new_page()
+    await ke_page.goto(KE_URL, wait_until="domcontentloaded", timeout=20000)
+    await ke_page.wait_for_timeout(1200)
+
     try:
-        await ke_page.goto(KE_URL, wait_until="domcontentloaded", timeout=20000)
-        await ke_page.wait_for_timeout(1200)
-
-        try:
-            await ke_page.click("button:has-text('동의합니다')", timeout=3000)
-            await ke_page.wait_for_timeout(500)
-        except:
-            pass
-
-        try:
-            await ke_page.click('button[data-click-name="Accept all"]', timeout=3000)
-            await ke_page.wait_for_timeout(500)
-        except:
-            try:
-                await ke_page.click("button:has-text('모든 쿠키 허용')", timeout=2000)
-                await ke_page.wait_for_timeout(500)
-            except:
-                pass
-
-        # fill()은 자동으로 요소 준비상태를 기다리므로 입력 직후 고정대기 제거
-        await ke_page.locator("input[maxlength='13']").first.fill(pnr)
-
-        await ke_page.click("button[data-dialog-id='#dialog-datepicker1']", timeout=5000)
-        await ke_page.wait_for_timeout(1000)
-
-        dep_day   = str(dep_date.day)
-        dep_month = dep_date.month
-        dep_year  = dep_date.year
-
-        await ke_page.evaluate(f"""
-            (function() {{
-                var tds = document.querySelectorAll('td.datepicker__td.-available[role="button"]');
-                for (var td of tds) {{
-                    var span = td.querySelector('span[aria-hidden="true"]');
-                    if (!span) continue;
-                    if (span.textContent.trim() !== '{dep_day}') continue;
-                    var container = td.closest('[id*="month{dep_year}{dep_month:02d}"]');
-                    if (container) {{
-                        td.click();
-                        return;
-                    }}
-                }}
-                for (var td of tds) {{
-                    var span = td.querySelector('span[aria-hidden="true"]');
-                    if (span && span.textContent.trim() === '{dep_day}') {{
-                        td.click();
-                        return;
-                    }}
-                }}
-            }})();
-        """)
+        await ke_page.click("button:has-text('동의합니다')", timeout=3000)
         await ke_page.wait_for_timeout(500)
+    except Exception:
+        pass
 
-        await ke_page.locator("input[autocomplete='family-name']").first.fill(last)
-        await ke_page.locator("input[autocomplete='given-name']").first.fill(first)
-
-        await ke_page.click("button:has-text('조회')", timeout=5000)
-
-        try:
-            await ke_page.wait_for_selector(".journey-info__date", timeout=20000)
-        except:
-            pass
-        await ke_page.wait_for_timeout(1500)
-
-        html_content = await ke_page.inner_text("body")
-
-        if any(kw in html_content for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
-            return "❌ PNR오류", "예약 확인 불가"
-
-        # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
-        if pnr.upper() not in html_content.upper():
-            return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
-
-        flt_match = re.search(r'KE\s*\d{3,4}', html_content)
-        flt_found = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
-
-        date_match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', html_content)
-        if date_match:
-            y = date_match.group(1)
-            m = date_match.group(2).zfill(2)
-            d = date_match.group(3).zfill(2)
-            date_found = f"{y}-{m}-{d}"
-        else:
-            date_found = "날짜미확인"
-
-        airports = re.findall(
-            r'\b(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
-            r'|NRT|HND|KIX|NGO|FUK|CTS|OKA'
-            r'|BKK|CNX|HKT|SGN|HAN|DAD|CXR|MNL|CEB|CRK'
-            r'|TPE|HKG|MFM|SIN|KUL|PNH|REP|VTE|RGN|DPS|PQC'
-            r'|PEK|PVG|CAN|TAO|SZX|WEH|YNJ|HRB|SHE)\b',
-            html_content
-        )
-        if len(airports) >= 2:
-            route_found = f"{airports[0]}→{airports[1]}"
-        else:
-            route_found = "구간미확인"
-
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if not _is_reliable_result(flt_found, route_found):
-            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-        return "✅ 확인완료", detail
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        _reraise_if_closed(e)
-        logging.error(f"대한항공 조회 실패 | PNR: {pnr} | 탑승객: {last}{first}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
-    finally:
-        try:
-            await ke_page.close()
-        except Exception:
-            pass
-
-
-async def check_lj(page, target):
-    pnr      = target["pnr"]
-    last     = target["last"]
-    first    = target["first"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
-
-    dep_date = parse_dep_date(target["dep_time"])
-    if not dep_date:
-        return "💥 오류", "출발일 파싱 실패"
-
-    intl = is_international(dep, arr)
-
-    if intl and eng_name:
-        parts       = eng_name.split("/")
-        input_last  = parts[0].strip() if len(parts) >= 1 else last
-        input_first = parts[1].strip() if len(parts) >= 2 else first
-    else:
-        input_last  = last
-        input_first = first
-
-    # 진에어는 SPA 구조 — 이전 조회 결과가 페이지에 잔류하므로 매 조회마다 새 탭 사용
-    lj_page = await page.context.new_page()
     try:
-        await lj_page.goto(LJ_URL, wait_until="domcontentloaded", timeout=20000)
-        await lj_page.wait_for_timeout(1200)
-
-        await lj_page.click("text=예약조회", timeout=5000)
-        await lj_page.wait_for_timeout(500)
-
-        # fill()은 요소 준비상태를 자동 대기하므로 입력 사이 고정대기 제거
-        await lj_page.locator("input[placeholder*='6자리']").first.fill(pnr)
-        await lj_page.locator("#lastName_resv").fill(input_last)
-        await lj_page.locator("#firstName_resv").fill(input_first)
-
-        await lj_page.click("#departureDate_resv", timeout=5000)
-        await lj_page.wait_for_timeout(1200)
-
-        dep_str = dep_date.strftime("%Y.%m.%d")
-        iframe_locator = lj_page.frame_locator("iframe[src*='basicCalendarLayer']")
-
+        await ke_page.click('button[data-click-name="Accept all"]', timeout=3000)
+        await ke_page.wait_for_timeout(500)
+    except Exception:
         try:
-            date_input = iframe_locator.locator(f"input[name='hiddenDate'][value^='{dep_str}']")
-            await date_input.evaluate("el => el.parentElement.click()")
-        except:
-            pass
-
-        await lj_page.wait_for_timeout(500)
-        await lj_page.click("button[role='login-button']", timeout=5000)
-
-        # 진에어 내부 예약번호 ≠ 조회 PNR — "여정 예약정보" 텍스트로 성공 판정
-        try:
-            await lj_page.wait_for_selector("text=여정 예약정보", timeout=15000)
-        except:
-            pass
-        await lj_page.wait_for_timeout(1500)
-
-        html_content = await lj_page.inner_text("body")
-
-        # CF 재체크
-        if any(kw in html_content for kw in CF_KEYWORDS):
-            return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
-
-        # 성공 판정: "여정 예약정보" 존재 여부
-        if "여정 예약정보" not in html_content:
-            if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
-                return "❌ PNR오류", "예약 확인 불가"
-            return "❌ PNR오류", "예약 확인 불가 (PNR 미조회)"
-
-        flt_match = re.search(r'LJ\d{3,4}', html_content)
-        flt_found = flt_match.group() if flt_match else "편명미확인"
-
-        # 페이지에 "예약일 YYYY.MM.DD(요일)"가 실제 출발일보다 먼저 나와서
-        # 첫 매치만 쓰면 예약일을 출발일로 착각함 — 예약일 다음 매치를 사용
-        date_matches = re.findall(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
-        if len(date_matches) >= 2:
-            y, m, d = date_matches[1]
-            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        elif len(date_matches) == 1:
-            y, m, d = date_matches[0]
-            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        else:
-            date_found = "날짜미확인"
-
-        airports = re.findall(
-            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX'
-            r'|CNX|BKK|HKT|NRT|HND|KIX|NGO|CTS|FUK|OKA'
-            r'|DAD|SGN|HAN|CXR|PQC|CEB|KLO|TAG|MNL'
-            r'|TPE|HKG|MFM|SIN|DPS|GUM)(?![A-Z0-9])',
-            html_content
-        )
-        if len(airports) >= 2:
-            route_found = f"{airports[0]}→{airports[1]}"
-        else:
-            route_found = "구간미확인"
-
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if not _is_reliable_result(flt_found, route_found):
-            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-        return "✅ 확인완료", detail
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        _reraise_if_closed(e)
-        logging.error(f"진에어 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
-    finally:
-        try:
-            await lj_page.close()
+            await ke_page.click("button:has-text('모든 쿠키 허용')", timeout=2000)
+            await ke_page.wait_for_timeout(500)
         except Exception:
             pass
 
+    # fill()은 자동으로 요소 준비상태를 기다리므로 입력 직후 고정대기 제거
+    await ke_page.locator("input[maxlength='13']").first.fill(pnr)
 
+    await ke_page.click("button[data-dialog-id='#dialog-datepicker1']", timeout=5000)
+    await ke_page.wait_for_timeout(1000)
+
+    dep_day   = str(dep_date.day)
+    dep_month = dep_date.month
+    dep_year  = dep_date.year
+
+    await ke_page.evaluate(f"""
+        (function() {{
+            var tds = document.querySelectorAll('td.datepicker__td.-available[role="button"]');
+            for (var td of tds) {{
+                var span = td.querySelector('span[aria-hidden="true"]');
+                if (!span) continue;
+                if (span.textContent.trim() !== '{dep_day}') continue;
+                var container = td.closest('[id*="month{dep_year}{dep_month:02d}"]');
+                if (container) {{
+                    td.click();
+                    return;
+                }}
+            }}
+            for (var td of tds) {{
+                var span = td.querySelector('span[aria-hidden="true"]');
+                if (span && span.textContent.trim() === '{dep_day}') {{
+                    td.click();
+                    return;
+                }}
+            }}
+        }})();
+    """)
+    await ke_page.wait_for_timeout(500)
+
+    await ke_page.locator("input[autocomplete='family-name']").first.fill(last)
+    await ke_page.locator("input[autocomplete='given-name']").first.fill(first)
+
+    await ke_page.click("button:has-text('조회')", timeout=5000)
+
+    try:
+        await ke_page.wait_for_selector(".journey-info__date", timeout=20000)
+    except Exception:
+        pass
+    await ke_page.wait_for_timeout(1500)
+
+    html_content = await ke_page.inner_text("body")
+
+    if any(kw in html_content for kw in ["조회 결과가 없", "예약을 찾을 수 없", "확인되지 않", "일치하는 예약"]):
+        return "❌ PNR오류", "예약 확인 불가"
+
+    # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
+    if pnr.upper() not in html_content.upper():
+        if _is_cf_page(html_content):
+            return "⏱️ 타임아웃", "보안 확인 화면 → 재실행 필요"
+        return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
+
+    flt_match = re.search(r'KE\s*\d{3,4}', html_content)
+    flt_found = flt_match.group().replace(" ", "") if flt_match else "편명미확인"
+
+    date_match = re.search(r'(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일', html_content)
+    if date_match:
+        y = date_match.group(1)
+        m = date_match.group(2).zfill(2)
+        d = date_match.group(3).zfill(2)
+        date_found = f"{y}-{m}-{d}"
+    else:
+        date_found = "날짜미확인"
+
+    return _verdict(flt_found, date_found, _route_from_codes(html_content, KE_AIRPORT_CODES), dep_date)
+
+
+@airline_check("진에어", needs_date=True)
+async def check_lj(lj_page, target):
+    # 진에어는 SPA 구조 — 이전 조회 결과가 페이지에 잔류하므로 매 조회마다 새 탭 사용
+    pnr = target["pnr"]
+    input_last, input_first = _input_name(target)
+    dep_date = parse_dep_date(target["dep_time"])
+
+    await lj_page.goto(LJ_URL, wait_until="domcontentloaded", timeout=20000)
+    await lj_page.wait_for_timeout(1200)
+
+    await lj_page.click("text=예약조회", timeout=5000)
+    await lj_page.wait_for_timeout(500)
+
+    # fill()은 요소 준비상태를 자동 대기하므로 입력 사이 고정대기 제거
+    await lj_page.locator("input[placeholder*='6자리']").first.fill(pnr)
+    await lj_page.locator("#lastName_resv").fill(input_last)
+    await lj_page.locator("#firstName_resv").fill(input_first)
+
+    await lj_page.click("#departureDate_resv", timeout=5000)
+    await lj_page.wait_for_timeout(1200)
+
+    dep_str = dep_date.strftime("%Y.%m.%d")
+    iframe_locator = lj_page.frame_locator("iframe[src*='basicCalendarLayer']")
+
+    # 날짜를 못 고른 채 조회하면 사이트가 거절해서 PNR오류로 잘못 표시되므로 여기서 구분
+    try:
+        date_input = iframe_locator.locator(f"input[name='hiddenDate'][value^='{dep_str}']")
+        await date_input.evaluate("el => el.parentElement.click()", timeout=10000)
+    except PWTimeout:
+        return "⚠️ 수동확인필요", f"달력에서 출발일({dep_str}) 선택 실패"
+
+    await lj_page.wait_for_timeout(500)
+    await lj_page.click("button[role='login-button']", timeout=5000)
+
+    # 진에어 내부 예약번호 ≠ 조회 PNR — "여정 예약정보" 텍스트로 성공 판정
+    try:
+        await lj_page.wait_for_selector("text=여정 예약정보", timeout=15000)
+    except Exception:
+        pass
+    await lj_page.wait_for_timeout(1500)
+
+    html_content = await lj_page.inner_text("body")
+
+    # CF 재체크
+    if _is_cf_page(html_content):
+        return "⏱️ 타임아웃", "클라우드플레어 차단 → 재실행 필요"
+
+    # 성공 판정: "여정 예약정보" 존재 여부
+    if "여정 예약정보" not in html_content:
+        if any(kw in html_content for kw in ["조회 결과가 없", "예약 내역이 없", "확인되지 않"]):
+            return "❌ PNR오류", "예약 확인 불가"
+        return "❌ PNR오류", "예약 확인 불가 (PNR 미조회)"
+
+    flt_match = re.search(r'LJ\d{3,4}', html_content)
+    flt_found = flt_match.group() if flt_match else "편명미확인"
+
+    return _verdict(
+        flt_found, _dot_departure_date(html_content),
+        _route_from_codes(html_content, AIRPORT_CODES), dep_date,
+    )
+
+
+@airline_check("파라타항공", new_tab=False)
 async def check_we(page, target, we_email):
-    pnr      = target["pnr"]
-    kor_name = target["kor_name"]
+    pnr = target["pnr"]
 
     if not we_email:
         return "⚠️ 수동확인필요", "파라타항공-이메일 미입력"
@@ -1467,7 +1512,7 @@ async def check_we(page, target, we_email):
         # 결과 페이지 대기
         try:
             await page.wait_for_url("**/viewReservationDetail.do**", timeout=15000)
-        except:
+        except Exception:
             pass
         await page.wait_for_timeout(1200)
 
@@ -1480,10 +1525,14 @@ async def check_we(page, target, we_email):
                 return "❌ PNR오류", f"알림: {dialog_msgs[0][:40]}"
             if any(kw in html_content for kw in ["일치하는 예약", "확인되지 않", "조회 결과가 없", "예약 내역이 없"]):
                 return "❌ PNR오류", "예약 확인 불가"
+            if _is_cf_page(html_content):
+                return "⏱️ 타임아웃", "보안 확인 화면 → 재실행 필요"
             return "💥 오류", "결과 페이지 이동 실패"
 
         # 조회한 PNR이 실제로 결과 화면에 있는지 확인 (잔류 화면 오판정 방지 2중 안전장치)
         if pnr.upper() not in html_content.upper():
+            if _is_cf_page(html_content):
+                return "⏱️ 타임아웃", "보안 확인 화면 → 재실행 필요"
             return "❌ PNR오류", "조회한 PNR이 결과 화면에서 확인되지 않음"
 
         # 편명 파싱 (WE208 형태)
@@ -1501,40 +1550,8 @@ async def check_we(page, target, we_email):
             date_found = "날짜미확인"
 
         # 구간 파싱 (한글이 코드에 바로 붙어도 매칭: 푸꾸옥PQC서울 등)
-        airports = re.findall(
-            r'(?<![A-Z0-9])(PUS|GMP|ICN|CJU|TAE|CJJ|HIN|RSU|KPO|MWX|PQC|RGN|DPS|MFM|HKG)(?![A-Z0-9])',
-            html_content
-        )
-        route_found = f"{airports[0]}→{airports[1]}" if len(airports) >= 2 else "구간미확인"
+        return _verdict(flt_found, date_found, _route_from_codes(html_content, WE_AIRPORT_CODES), dep_date)
 
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        # 날짜 불일치 검사
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if not _is_reliable_result(flt_found, route_found):
-            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-        return "✅ 확인완료", detail
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        _reraise_if_closed(e)
-        logging.error(f"파라타항공 조회 실패 | PNR: {pnr} | 탑승객: {kor_name}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
     finally:
         try:
             page.remove_listener("dialog", _on_dialog)
@@ -1551,13 +1568,14 @@ async def _manual_check(page, target, airline_label, url, fields, guide_extra=""
     # 자동화 창은 수동확인에 쓰지 않음 — 혼동 방지용 안내 문구 표시
     try:
         await page.goto(
-            "data:text/html,"
-            "<html><body style='font-family:sans-serif;padding:60px;"
-            "font-size:22px;color:#333;text-align:center;'>"
-            "이 창은 자동화 전용입니다.<br><br>"
-            f"{airline_label} 조회는<br>"
-            "<b>새로 열린 별도의 브라우저 창</b>에서 진행해주세요."
-            "</body></html>",
+            _html_url(
+                "<html><body style='font-family:sans-serif;padding:60px;"
+                "font-size:22px;color:#333;text-align:center;'>"
+                "이 창은 자동화 전용입니다.<br><br>"
+                f"{airline_label} 조회는<br>"
+                "<b>새로 열린 별도의 브라우저 창</b>에서 진행해주세요."
+                "</body></html>"
+            ),
             timeout=5000
         )
     except Exception:
@@ -1637,19 +1655,15 @@ async def check_tw(page, target):
     """
     pnr      = target["pnr"]
     kor_name = target["kor_name"]
-    eng_name = target.get("eng_name", "")
     dep_time = target.get("dep_time", "")
     dep      = target.get("dep", "")
     arr      = target.get("arr", "")
 
     fields = [("PNR", pnr), ("한글성명", kor_name)]
-    if eng_name:
-        parts = eng_name.split("/")
-        eng_last  = parts[0].strip() if len(parts) >= 1 else eng_name
-        eng_first = parts[1].strip() if len(parts) >= 2 else ""
-        fields.append(("영문성", eng_last))
-        if eng_first:
-            fields.append(("영문이름", eng_first))
+    eng = _split_eng(target.get("eng_name", ""))
+    if eng:
+        fields.append(("영문성", eng[0]))
+        fields.append(("영문이름", eng[1]))
     fields.append(("구간", f"{dep} → {arr}"))
     fields.append(("출발일", dep_time))
 
@@ -1748,8 +1762,13 @@ class _ExtBridge:
                     pass
                 self._send({"ok": True})
 
+        # HTTPServer 기본값은 포트 재사용 허용인데, 윈도우에선 이 옵션이 있으면 이미 쓰는 포트에도
+        # 바인딩이 성공해서 "프로그램이 이미 켜져 있음"을 감지하지 못함 → 끔
+        class _Server(http.server.ThreadingHTTPServer):
+            allow_reuse_address = False
+
         try:
-            self.server = http.server.ThreadingHTTPServer(("127.0.0.1", EXT_PORT), Handler)
+            self.server = _Server(("127.0.0.1", EXT_PORT), Handler)
         except OSError as e:
             logging.warning(f"확장 연동 창구 열기 실패 (포트 {EXT_PORT} 사용 중): {e}")
             return False
@@ -1785,12 +1804,6 @@ def _open_bx_in_chrome():
             logging.warning(f"크롬으로 에어부산 열기 실패: {e}")
     webbrowser.open(BX_URL, new=2)
 
-
-def _ver_tuple(v):
-    try:
-        return tuple(int(x) for x in str(v).split("."))
-    except Exception:
-        return (0,)
 
 
 def _warn_if_old_extension():
@@ -1870,15 +1883,8 @@ async def check_bx_ext(page, target):
     if not EXT.available:
         return "⚠️ 수동확인필요", "에어부산 확장 미연결 — 조회 안 함 (크롬 확장 확인 후 이어서 조회)"
 
-    pnr      = target["pnr"]
-    eng_name = target.get("eng_name", "")
-    if is_international(target["dep"], target["arr"]) and eng_name:
-        parts = eng_name.split("/")
-        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        first = parts[1].strip() if len(parts) >= 2 else target["first"]
-    else:
-        last  = target["last"]
-        first = target["first"]
+    pnr = target["pnr"]
+    last, first = _input_name(target)
 
     tid = uuid.uuid4().hex
     with EXT.lock:
@@ -1918,18 +1924,10 @@ async def check_bx_manual(page, target):
     평소 쓰는 크롬에서는 정상 통과되므로 티웨이와 같은 수동 확인 방식으로 전환.
     입력값(성/이름)은 자동조회 때와 동일한 규칙: 국제선+영문명 있으면 영문, 아니면 한글
     """
-    pnr      = target["pnr"]
-    eng_name = target.get("eng_name", "")
-    dep      = target.get("dep", "")
-    arr      = target.get("arr", "")
-
-    if is_international(dep, arr) and eng_name:
-        parts = eng_name.split("/")
-        last  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        first = parts[1].strip() if len(parts) >= 2 else target["first"]
-    else:
-        last  = target["last"]
-        first = target["first"]
+    pnr = target["pnr"]
+    dep = target.get("dep", "")
+    arr = target.get("arr", "")
+    last, first = _input_name(target)
 
     fields = [
         ("PNR", pnr),
@@ -2041,195 +2039,127 @@ def _prompt_jj_calendar(pnr, kor_name, target_date_display):
     return result_box[0]
 
 
-async def check_jj(page, target):
+@airline_check("제주항공", needs_date=True)
+async def check_jj(jj_page, target):
     """
     제주항공 — 조회 페이지(viewOnOffReservationList.do)에서 입력 후
     결과 페이지(viewReservationDetail.do)로 이동.
     ※ 진입 시 마케팅 팝업이 뜰 수 있어 자동 닫기 시도 후 진행.
-    ※ 달력 날짜 선택은 "일(day) 숫자" 텍스트 매칭 방식 — 검증 필요.
+    ※ 달력 날짜 선택은 사람이 직접 클릭.
     """
-    pnr      = target["pnr"]
-    last     = target["last"]
-    first    = target["first"]
-    eng_name = target.get("eng_name", "")
-    dep      = target["dep"]
-    arr      = target["arr"]
-
+    pnr = target["pnr"]
+    input_last, input_first = _input_name(target)
     dep_date = parse_dep_date(target["dep_time"])
-    if not dep_date:
-        return "💥 오류", "출발일 파싱 실패"
 
-    intl = is_international(dep, arr)
+    await jj_page.goto(JJ_URL, wait_until="domcontentloaded", timeout=20000)
+    await jj_page.wait_for_timeout(1000)
 
-    if intl and eng_name:
-        parts       = eng_name.split("/")
-        input_last  = parts[0].strip() if len(parts) >= 1 else last
-        input_first = parts[1].strip() if len(parts) >= 2 else first
-    else:
-        input_last  = last
-        input_first = first
+    # 진입 시 뜨는 마케팅 팝업(그루비 등)이 폼을 가려 클릭이 막히는 문제 방지
+    await _dismiss_ad_popup(jj_page)
 
-    jj_page = await page.context.new_page()
+    await jj_page.locator("#recordLocatorLabel").fill(pnr)
+    await jj_page.locator("#psInputLastName_1").fill(input_last)
+
+    await jj_page.locator("#psInputFirstName_1").fill(input_first)
+    await jj_page.locator("#psInputFirstName_1").press("Tab")
+    await jj_page.wait_for_timeout(300)
+
+    # 탑승일자 달력 선택 — 자동 클릭이 계속 불안정해서 사람이 직접 선택하도록 전환
+    # (입력값은 이미 자동으로 채워짐, 달력 클릭만 사람이 하고 나머지는 자동 진행)
+    await jj_page.click("#boardingDateBtn", timeout=5000)
+    await jj_page.wait_for_selector("#datepicker01", timeout=5000)
+    await jj_page.wait_for_timeout(500)
+    await _dismiss_ad_popup(jj_page)
+
+    target_date_display = dep_date.strftime("%Y-%m-%d (%a)")
+    choice = _prompt_jj_calendar(pnr, target["kor_name"], target_date_display)
+
+    if choice != "done":
+        return "⚠️ 수동확인필요", "[제주달력] 사용자가 건너뜀"
+
+    # 광고가 다시 떴을 수 있어 한 번 더 정리
+    await _dismiss_ad_popup(jj_page)
+
+    # 사람이 사이트 "선택" 버튼을 안 눌렀을 경우 대비해서 자동화가 눌러줌 (있으면)
     try:
-        await jj_page.goto(JJ_URL, wait_until="domcontentloaded", timeout=20000)
-        await jj_page.wait_for_timeout(1000)
+        choose_btn = jj_page.locator("#chooseDepDateBtn")
+        if await choose_btn.is_visible(timeout=500):
+            await choose_btn.click(timeout=2000)
+            await jj_page.wait_for_timeout(500)
+    except Exception:
+        pass
 
-        # 진입 시 뜨는 마케팅 팝업(그루비 등)이 폼을 가려 클릭이 막히는 문제 방지
-        await _dismiss_ad_popup(jj_page)
+    # 상태 확인 — 두 가지 경우 모두 정상 진행:
+    # (1) 검색 폼에서 날짜가 채워짐  (2) 이미 조회까지 눌러서 결과 페이지로 넘어감
+    date_selected = False
+    already_searched = False
+    try:
+        selectdate_val = await jj_page.evaluate(
+            "() => { const el = document.querySelector('#selectDate'); return el ? el.value : null; }"
+        )
+        if selectdate_val:
+            date_selected = True
+        elif selectdate_val is None:
+            # #selectDate 자체가 없다 = 검색 폼을 벗어난 것 (이미 결과 페이지로 이동)
+            already_searched = True
+    except Exception:
+        pass
 
-        await jj_page.locator("#recordLocatorLabel").fill(pnr)
-        await jj_page.locator("#psInputLastName_1").fill(input_last)
+    if not date_selected and not already_searched:
+        return "⚠️ 수동확인필요", "[제주달력] 날짜 선택 실패"
 
-        await jj_page.locator("#psInputFirstName_1").fill(input_first)
-        await jj_page.locator("#psInputFirstName_1").press("Tab")
-        await jj_page.wait_for_timeout(300)
+    await jj_page.wait_for_timeout(300)
 
-        # 탑승일자 달력 선택 — 자동 클릭이 계속 불안정해서 사람이 직접 선택하도록 전환
-        # (입력값은 이미 자동으로 채워짐, 달력 클릭만 사람이 하고 나머지는 자동 진행)
-        await jj_page.click("#boardingDateBtn", timeout=5000)
-        await jj_page.wait_for_selector("#datepicker01", timeout=5000)
-        await jj_page.wait_for_timeout(500)
-        await _dismiss_ad_popup(jj_page)
-
-        target_date_display = dep_date.strftime("%Y-%m-%d (%a)")
-        choice = _prompt_jj_calendar(pnr, target["kor_name"], target_date_display)
-
-        if choice != "done":
-            return "⚠️ 수동확인필요", "[제주달력] 사용자가 건너뜀"
-
-        # 광고가 다시 떴을 수 있어 한 번 더 정리
-        await _dismiss_ad_popup(jj_page)
-
-        # 사람이 사이트 "선택" 버튼을 안 눌렀을 경우 대비해서 자동화가 눌러줌 (있으면)
+    # 조회 버튼 — 사람이 이미 눌렀으면 중복 클릭하지 않음
+    if not already_searched:
+        # id="searchResvBtn" (입력 검증 통과 전까지 disabled)
         try:
-            choose_btn = jj_page.locator("#chooseDepDateBtn")
-            if await choose_btn.is_visible(timeout=500):
-                await choose_btn.click(timeout=2000)
-                await jj_page.wait_for_timeout(500)
+            await jj_page.wait_for_selector("#searchResvBtn:not([disabled])", timeout=5000)
         except Exception:
             pass
+        await jj_page.click("#searchResvBtn", timeout=5000)
 
-        # 상태 확인 — 두 가지 경우 모두 정상 진행:
-        # (1) 검색 폼에서 날짜가 채워짐  (2) 이미 조회까지 눌러서 결과 페이지로 넘어감
-        date_selected = False
-        already_searched = False
-        try:
-            selectdate_val = await jj_page.evaluate(
-                "() => { const el = document.querySelector('#selectDate'); return el ? el.value : null; }"
-            )
-            if selectdate_val:
-                date_selected = True
-            elif selectdate_val is None:
-                # #selectDate 자체가 없다 = 검색 폼을 벗어난 것 (이미 결과 페이지로 이동)
-                already_searched = True
-        except Exception:
-            pass
+    # 조회 성공 시 viewReservationDetail.do로 실제 페이지 이동(navigate)이 발생함
+    # 텍스트만 기다리면 이동 중인 중간 상태를 잘못 캡처할 수 있어 URL 이동을 우선 대기
+    # (URL이 안 바뀌는 SPA 방식일 수도 있어 짧게 시도 후 텍스트 대기로 넘어감)
+    try:
+        await jj_page.wait_for_url(re.compile(r"viewReservationDetail"), timeout=8000)
+    except Exception:
+        pass
 
-        if not date_selected and not already_searched:
-            return "❌ PNR오류", "달력 날짜 선택 실패"
+    # URL 이동 후에도 렌더링 시간 필요 — "탑승객 정보" 텍스트로 최종 확인
+    try:
+        await jj_page.wait_for_selector("text=탑승객 정보", timeout=10000)
+    except Exception:
+        pass
+    await jj_page.wait_for_timeout(1500)
 
-        await jj_page.wait_for_timeout(300)
+    html_content = await jj_page.inner_text("body")
 
-        # 조회 버튼 — 사람이 이미 눌렀으면 중복 클릭하지 않음
-        if not already_searched:
-            # id="searchResvBtn" (입력 검증 통과 전까지 disabled)
-            try:
-                await jj_page.wait_for_selector("#searchResvBtn:not([disabled])", timeout=5000)
-            except Exception:
-                pass
-            await jj_page.click("#searchResvBtn", timeout=5000)
+    if _is_cf_page(html_content):
+        return "⏱️ 타임아웃", "보안 확인 필요 → 재실행 필요"
 
-        # 조회 성공 시 viewReservationDetail.do로 실제 페이지 이동(navigate)이 발생함
-        # 텍스트만 기다리면 이동 중인 중간 상태를 잘못 캡처할 수 있어 URL 이동을 우선 대기
-        # (URL이 안 바뀌는 SPA 방식일 수도 있어 짧게 시도 후 텍스트 대기로 넘어감)
-        try:
-            await jj_page.wait_for_url(re.compile(r"viewReservationDetail"), timeout=8000)
-        except Exception:
-            pass
+    # 성공 판정: "탑승객 정보" 존재 여부
+    if "탑승객 정보" not in html_content:
+        return "❌ PNR오류", "예약 확인 불가"
 
-        # URL 이동 후에도 렌더링 시간 필요 — "탑승객 정보" 텍스트로 최종 확인
-        try:
-            await jj_page.wait_for_selector("text=탑승객 정보", timeout=10000)
-        except Exception:
-            pass
-        await jj_page.wait_for_timeout(1500)
+    flt_match = re.search(r'7C\d{3,4}', html_content)
+    flt_found = flt_match.group() if flt_match else "편명미확인"
 
-        html_content = await jj_page.inner_text("body")
+    # 이 사이트는 공항코드(PQC/ICN) 대신 한글 도시명("푸꾸옥","서울")으로 표시함
+    try:
+        city_titles = await jj_page.locator(".boarding__info-title").all_inner_texts()
+        city_titles = [c.strip() for c in city_titles if c.strip()]
+    except Exception:
+        city_titles = []
 
-        if any(kw in html_content for kw in CF_KEYWORDS):
-            return "⏱️ 타임아웃", "보안 확인 필요 → 재실행 필요"
+    if len(city_titles) >= 2:
+        route_found = f"{city_titles[0]}→{city_titles[1]}"
+    else:
+        # 혹시 코드로 표시되는 경우 대비한 폴백
+        route_found = _route_from_codes(html_content, AIRPORT_CODES)
 
-        # 성공 판정: "탑승객 정보" 존재 여부
-        if "탑승객 정보" not in html_content:
-            return "❌ PNR오류", "예약 확인 불가"
-
-        flt_match = re.search(r'7C\d{3,4}', html_content)
-        flt_found = flt_match.group() if flt_match else "편명미확인"
-
-        # 페이지에 "예약일 YYYY.MM.DD(요일)"가 실제 출발일보다 먼저 나와서
-        # 첫 매치만 쓰면 예약일을 출발일로 착각함 — 예약일 다음 매치를 사용
-        date_matches = re.findall(r'(\d{4})\.(\d{2})\.(\d{2})\(', html_content)
-        if len(date_matches) >= 2:
-            y, m, d = date_matches[1]
-            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        elif len(date_matches) == 1:
-            y, m, d = date_matches[0]
-            date_found = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        else:
-            date_found = "날짜미확인"
-
-        # 이 사이트는 공항코드(PQC/ICN) 대신 한글 도시명("푸꾸옥","서울")으로 표시함
-        try:
-            city_titles = await jj_page.locator(".boarding__info-title").all_inner_texts()
-            city_titles = [c.strip() for c in city_titles if c.strip()]
-        except Exception:
-            city_titles = []
-
-        if len(city_titles) >= 2:
-            route_found = f"{city_titles[0]}→{city_titles[1]}"
-        else:
-            # 혹시 코드로 표시되는 경우 대비한 폴백
-            airports = re.findall(
-                rf'(?<![A-Z0-9])({AIRPORT_CODES})(?![A-Z0-9])',
-                html_content
-            )
-            if len(airports) >= 2:
-                route_found = f"{airports[0]}→{airports[1]}"
-            else:
-                route_found = "구간미확인"
-
-        detail = f"{flt_found} | {date_found} | {route_found}"
-
-        mismatch = []
-        if dep_date and date_found != "날짜미확인":
-            try:
-                site_date = datetime.strptime(date_found, "%Y-%m-%d")
-                if dep_date.date() != site_date.date():
-                    mismatch.append(
-                        f"날짜불일치(PDC:{dep_date.strftime('%m/%d')} vs 사이트:{site_date.strftime('%m/%d')})"
-                    )
-            except Exception:
-                pass
-
-        if mismatch:
-            return "⚠️ 불일치", detail + " | " + " / ".join(mismatch)
-
-        if not _is_reliable_result(flt_found, route_found):
-            return "❌ PNR오류", f"예약 확인 불가 (편명/구간 모두 미확인) | {detail}"
-
-        return "✅ 확인완료", detail
-
-    except PWTimeout:
-        return "⏱️ 타임아웃", "재시도 필요"
-    except Exception as e:
-        _reraise_if_closed(e)
-        logging.error(f"제주항공 조회 실패 | PNR: {pnr} | 탑승객: {input_last}{input_first}", exc_info=True)
-        return "💥 오류", "시스템 로그 확인 필요"
-    finally:
-        try:
-            await jj_page.close()
-        except Exception:
-            pass
+    return _verdict(flt_found, _dot_departure_date(html_content), route_found, dep_date)
 
 
 async def _bx_check(page, target):
@@ -2239,60 +2169,46 @@ async def _bx_check(page, target):
     return await check_bx(page, target)
 
 
+# 재시도 로직을 타는 자동 조회 항공사 (파라타는 이메일 인자가 추가로 필요해서 _auto_check에서 처리)
+AUTO_CHECKS = {"에어부산": _bx_check, "대한항공": check_ke, "진에어": check_lj, "제주항공": check_jj}
+
+
+async def _auto_check(page, target, we_email):
+    if target["airline"] == "파라타항공":
+        return await check_we(page, target, we_email)
+    return await AUTO_CHECKS[target["airline"]](page, target)
+
+
 async def run_check(page, target, we_email=""):
     """단일 조회 실행 + 재시도 로직"""
-    airline  = target["airline"]
-    eng_name = target.get("eng_name", "")
+    airline = target["airline"]
 
     if airline == "에어부산" and BX_MODE == "ext" and not EXT.available:
         # 확장 미연결 → 조회하지 않고 표시만 (재시도 대상 아님)
         return await check_bx_ext(page, target)
+    # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
     if airline == "에어부산" and BX_MODE == "manual":
-        # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
         return await check_bx_manual(page, target)
-    elif airline == "에어부산":
-        result, detail = await _bx_check(page, target)
-    elif airline == "대한항공":
-        result, detail = await check_ke(page, target)
-    elif airline == "진에어":
-        result, detail = await check_lj(page, target)
-    elif airline == "제주항공":
-        result, detail = await check_jj(page, target)
-    elif airline == "파라타항공":
-        result, detail = await check_we(page, target, we_email)
-    elif airline == "티웨이항공":
-        # 수동확인 방식 — 자동 재시도/영문재시도 로직 대상 아님
+    if airline == "티웨이항공":
         return await check_tw(page, target)
-    else:
+    if airline != "파라타항공" and airline not in AUTO_CHECKS:
         return "⬜ 미지원", "지원 항공사 아님"
+
+    result, detail = await _auto_check(page, target, we_email)
 
     # ── 국내선 한글 조회 실패 시 영문으로 재시도 (외국인 승무원 대비) ──
     # 파라타 제외 / 영문명 있을 때 / PNR오류·예약없음일 때만
-    intl = is_international(target["dep"], target["arr"])
+    eng = _split_eng(target.get("eng_name", ""))
     if (
-        airline in ("에어부산", "대한항공", "진에어", "제주항공")
-        and not intl
-        and eng_name
+        airline in AUTO_CHECKS
+        and not is_international(target["dep"], target["arr"])
+        and eng
         and any(kw in result for kw in ["PNR오류", "예약없음"])
     ):
-        # 영문 이름으로 강제 전환한 임시 target 복사
-        parts = eng_name.split("/")
-        tmp = dict(target)
-        tmp["last"]  = parts[0].strip() if len(parts) >= 1 else target["last"]
-        tmp["first"] = parts[1].strip() if len(parts) >= 2 else target["first"]
-        # 국제선 분기를 타지 않도록 dep/arr을 해외로 속이지 않고
-        # check_* 함수 내 intl=False → 한글 사용이 되므로
-        # last/first만 덮어쓴 tmp를 넘기면 영문으로 입력됨
+        # 국내선이면 _input_name이 target의 last/first를 그대로 쓰므로, 영문으로 덮어쓴 복사본을 넘김
+        tmp = dict(target, last=eng[0], first=eng[1])
         await asyncio.sleep(1)
-        r2, d2 = result, detail   # 분기 누락 시 NameError 방지
-        if airline == "에어부산":
-            r2, d2 = await _bx_check(page, tmp)
-        elif airline == "대한항공":
-            r2, d2 = await check_ke(page, tmp)
-        elif airline == "진에어":
-            r2, d2 = await check_lj(page, tmp)
-        elif airline == "제주항공":
-            r2, d2 = await check_jj(page, tmp)
+        r2, d2 = await _auto_check(page, tmp, we_email)
         if "확인완료" in r2 or "불일치" in r2:
             result = r2
             detail = "[영문재시도] " + d2
@@ -2300,20 +2216,23 @@ async def run_check(page, target, we_email=""):
     # ── 타임아웃/오류 시 1회 재시도 ──
     elif "타임아웃" in result or ("오류" in result and "PNR" not in result and "파싱" not in detail):
         await asyncio.sleep(2)
-        if airline == "에어부산":
-            result, detail = await _bx_check(page, target)
-        elif airline == "대한항공":
-            result, detail = await check_ke(page, target)
-        elif airline == "진에어":
-            result, detail = await check_lj(page, target)
-        elif airline == "제주항공":
-            result, detail = await check_jj(page, target)
-        elif airline == "파라타항공":
-            result, detail = await check_we(page, target, we_email)
+        result, detail = await _auto_check(page, target, we_email)
         if "확인완료" in result or "불일치" in result:
             detail = "[재시도 성공] " + detail
 
     return result, detail
+
+
+async def _context_alive(context):
+    """브라우저가 살아있는지 확인 — 조회 탭 하나만 닫힌 경우와 브라우저 전체가 닫힌 경우를 구분"""
+    if context is None:
+        return False
+    try:
+        probe = await context.new_page()
+        await probe.close()
+        return True
+    except Exception:
+        return False
 
 
 async def main():
@@ -2341,6 +2260,12 @@ async def main():
     print(f"📂 선택한 파일: {EXCEL_PATH}")
     print(f"   시트: {SHEET_NAME}\n")
 
+    # 빈칸·형식 오류 PNR은 조회 없이 결과가 이미 정해진 건
+    invalid_pnr = sum(1 for t in targets if t.get("skipped"))
+    if invalid_pnr:
+        print(f"❌ PNR 빈칸·형식 오류 {invalid_pnr}건 → 조회 없이 [확인필요_요약]에 표시합니다.\n")
+    queryable = total - invalid_pnr
+
     if total == 0:
         print(f"검증 대상이 없습니다. ({mode_label})")
         print("\n⚠️  데이터가 분명히 있는데 0건이면 아래를 확인하세요:")
@@ -2352,27 +2277,24 @@ async def main():
         return
 
     # ── 이미 조회 완료된 건이 있으면 이어서 할지 확인 ──
-    done_targets = [t for t in targets if "확인완료" in t["prev_result"]]
+    done_targets = [t for t in targets if "확인완료" in t["prev_result"] and not t.get("skipped")]
     if done_targets:
-        if ask_resume(len(done_targets), total):
+        if ask_resume(len(done_targets), queryable):
             for t in done_targets:
                 t["result"] = t["prev_result"]
                 t["detail"] = t["prev_detail"]
                 t["skipped"] = True
             print(f"⏭  이미 완료된 {len(done_targets)}건은 건너뜁니다. "
-                  f"(남은 조회: {total - len(done_targets)}건)\n")
+                  f"(남은 조회: {queryable - len(done_targets)}건)\n")
 
     pending = [t for t in targets if not t.get("skipped")]
 
-    bx_cnt = sum(1 for t in pending if t["airline"] == "에어부산")
-    ke_cnt = sum(1 for t in pending if t["airline"] == "대한항공")
-    lj_cnt = sum(1 for t in pending if t["airline"] == "진에어")
-    jj_cnt = sum(1 for t in pending if t["airline"] == "제주항공")
-    we_cnt = sum(1 for t in pending if t["airline"] == "파라타항공")
-    tw_cnt = sum(1 for t in pending if t["airline"] == "티웨이항공")
+    counts = Counter(t["airline"] for t in pending)
+    bx_cnt = counts["에어부산"]
+    we_cnt = counts["파라타항공"]
 
     print(f"검증 대상: {len(pending)}건 ({mode_label})")
-    print(f"  에어부산: {bx_cnt}건 | 대한항공: {ke_cnt}건 | 진에어: {lj_cnt}건 | 제주항공: {jj_cnt}건 | 파라타항공: {we_cnt}건 | 티웨이: {tw_cnt}건")
+    print("  " + " | ".join(f"{a}: {counts[a]}건" for a in AIRLINES))
     print(f"  딜레이: {delay_min}~{delay_max}초")
     print(f"{'='*50}\n")
 
@@ -2394,8 +2316,6 @@ async def main():
         )
         if not we_email:
             print("⚠️  이메일 미입력 → 파라타항공 건은 수동확인으로 처리됩니다.")
-        else:
-            print(f"파라타항공 조회 이메일: {we_email}\n")
 
     # 시스템 Chrome 경로 자동 탐색
     CHROME_PATHS = [
@@ -2415,8 +2335,6 @@ async def main():
     else:
         print("⚠️  Chrome 미발견 → Playwright Chromium으로 실행 (에어부산 캡챠 발생 가능)")
 
-    # Chrome 쿠키 파일 임시 복사 (원본 잠금 회피)
-    import shutil, tempfile
     # (v3.18.3) 자동화 크롬이 필요한 항공사가 있을 때만 띄움
     # (에어부산 확장조회·티웨이 수동확인은 평소 크롬을 쓰므로 자동화 창이 필요 없음)
     need_browser = any(t["airline"] in ("대한항공", "진에어", "제주항공", "파라타항공") for t in pending) \
@@ -2448,9 +2366,6 @@ async def main():
             )
             if chrome_exe:
                 launch_kwargs["executable_path"] = chrome_exe
-            if PATCHRIGHT:
-                # Patchright는 자체적으로 자동화 흔적을 처리하므로 커스텀 인자를 최소화해야 함
-                launch_kwargs["args"] = ["--window-size=1280,800"]
 
             # user_agent 고정값 제거 (v3.14.0): 예전엔 Chrome/124로 고정해뒀는데
             # 실제 설치된 Chrome 버전과 달라서 오히려 봇 의심 신호가 됐음 → 실제 값 그대로 사용
@@ -2460,8 +2375,6 @@ async def main():
                 viewport={"width": 1280, "height": 800},
                 java_script_enabled=True,
             )
-            if PATCHRIGHT:
-                ctx_kwargs["viewport"] = None  # 실제 창 크기 그대로 (Patchright 권장)
             try:
                 os.makedirs(bot_profile, exist_ok=True)
                 context = await p.chromium.launch_persistent_context(
@@ -2478,9 +2391,6 @@ async def main():
         # playwright-stealth 적용 (클라우드플레어 핑거프린트 우회)
         if cdp_mode or context is None:
             stealth = None  # 실제 크롬에 연결했거나 자동화 창을 안 띄운 경우 → 위장 불필요
-        elif PATCHRIGHT:
-            stealth = None
-            print("Patchright 모드 (자동화 흔적 제거 브라우저)")
         elif STEALTH_AVAILABLE:
             stealth = Stealth(
                 navigator_languages_override=("ko-KR", "ko"),
@@ -2499,6 +2409,9 @@ async def main():
             """)
             print("⚠️  playwright-stealth 미설치 → 기본 우회 모드")
 
+        if context is not None:
+            context.set_default_timeout(DEFAULT_TIMEOUT_MS)
+
         page = None
         if context is not None:
             page = context.pages[0] if context.pages else await context.new_page()
@@ -2516,8 +2429,7 @@ async def main():
         # 1개는 열려있게 만들어 이 문제를 원천 차단함.
         # (v3.18.3) 자동화 창이 빈 화면이면 필요 없는 창으로 오해해서 닫는 경우가 있어,
         # 첫 탭과 안전핀 탭에 "닫지 마세요" 안내를 띄워둠 (auto 모드의 첫 탭은 에어부산 화면이라 제외)
-        from urllib.parse import quote as _q
-        guide_url = "data:text/html;charset=utf-8," + _q(
+        guide_url = _html_url(
             "<html><head><title>조회용 자동화 창 - 닫지 마세요</title></head>"
             "<body style='font-family:sans-serif;padding:60px;font-size:22px;"
             "color:#333;text-align:center;line-height:1.7'>"
@@ -2547,10 +2459,12 @@ async def main():
         pending_total = len(pending)
         progress_state = create_progress_window(pending_total)
 
+        fail_streak = Counter()  # 항공사별 연속 타임아웃·오류 횟수
+
         for i, target in enumerate(pending, 1):
             airline = target["airline"]
             pnr     = target["pnr"]
-            print(f"[{i:02d}/{pending_total}] {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
+            print(f"[{i:02d}/{pending_total}] {target['row']:>3}행 {target['kor_name']:5} | {airline} | {pnr} | ", end="", flush=True)
 
             # v3.11.0: PNR 캐시 제거 — 같은 예약번호라도 사람마다 매번 개별 조회함.
             # (동승자 이름 검증으로도 오탐 사례가 나와서, 속도보다 정확도를 우선함.
@@ -2562,26 +2476,45 @@ async def main():
                     page = await context.new_page()
             except Exception:
                 pass  # 브라우저 자체가 죽은 경우 → 아래 조회에서 closed로 감지되어 안전 종료
-            try:
-                result, detail = await run_check(page, target, we_email)
-            except Exception as exc:
-                logging.error(f"조회 중 예외 | {airline} | PNR: {pnr}", exc_info=True)
-                result, detail = "💥 오류", "조회 중 오류 발생 (로그 확인)"
-                if "closed" in str(exc).lower():
-                    target["result"] = result
-                    target["detail"] = detail
-                    print(f"{result}  {detail}")
-                    update_progress_window(progress_state, i, pending_total, target, result)
-                    print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
-                    print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
-                    for rest in pending[i:]:
-                        rest["result"] = "⬜ 미조회"
-                        rest["detail"] = "브라우저 종료로 미처리"
-                    break
+
+            tripped = fail_streak[airline] >= MAX_FAIL_STREAK
+            if tripped:
+                # 사이트 변경·차단 상황에서 헛조회를 계속하지 않음 (요약 시트에 미조회로 표시)
+                result, detail = "⬜ 미조회", f"연속 {MAX_FAIL_STREAK}회 실패로 조회 중단 — 사이트 확인 후 재실행"
+            else:
+                try:
+                    result, detail = await run_check(page, target, we_email)
+                except Exception as exc:
+                    logging.error(f"조회 중 예외 | {airline} | {target['row']}행", exc_info=True)
+                    result, detail = "💥 오류", "조회 중 오류 발생 (로그 확인)"
+                    if "closed" in str(exc).lower():
+                        if await _context_alive(context):
+                            # 조회 탭만 닫힌 경우 — 이 건만 오류로 두고 계속 진행
+                            detail = "조회 탭이 닫힘 — 재조회 필요"
+                        else:
+                            target["result"] = result
+                            target["detail"] = detail
+                            print(f"{result}  {detail}")
+                            update_progress_window(progress_state, i, pending_total, target, result)
+                            print("\n⚠️  브라우저가 닫혀 남은 건은 진행할 수 없습니다.")
+                            print("→ 여기까지의 결과는 엑셀에 저장됩니다.\n")
+                            for rest in pending[i:]:
+                                rest["result"] = "⬜ 미조회"
+                                rest["detail"] = "브라우저 종료로 미처리"
+                            break
             target["result"] = result
             target["detail"] = detail
             print(f"{result}  {detail}")
             update_progress_window(progress_state, i, pending_total, target, result)
+
+            if not tripped:
+                if "타임아웃" in result or "💥" in result:
+                    fail_streak[airline] += 1
+                    if fail_streak[airline] == MAX_FAIL_STREAK:
+                        print(f"\n⚠️  {airline} {MAX_FAIL_STREAK}건 연속 실패 — 사이트 변경·차단 가능성이 있어 {airline} 조회를 멈춥니다.")
+                        print("   남은 건은 '미조회'로 표시하고 다른 항공사는 계속 진행합니다.\n")
+                else:
+                    fail_streak[airline] = 0
 
             # 매 건마다 조용히 중간 저장. 프로그램이 창닫기/강제종료/정전 등으로
             # 예고 없이 죽어도, 재실행 시 여기까지의 결과는 "이어서 조회"로 살아남음.
@@ -2589,7 +2522,7 @@ async def main():
             # 엑셀 자체가 손상되는 최악의 경우를 대비한 가벼운 원본 백업
             _append_jsonl_backup(target)
 
-            if i < pending_total:
+            if i < pending_total and not tripped:
                 # 수동확인 건(티웨이, 수동모드 에어부산)은 사람이 직접 조회하므로 대기 불필요
                 manual = target["airline"] == "티웨이항공" or (
                     target["airline"] == "에어부산" and
@@ -2634,16 +2567,16 @@ async def main():
 
     save_results(EXCEL_PATH, SHEET_NAME, targets)
 
-    confirmed = sum(1 for t in targets if t["result"] and "확인완료"    in str(t["result"]))
-    mismatch  = sum(1 for t in targets if t["result"] and "불일치"       in str(t["result"]))
-    no_rsv    = sum(1 for t in targets if t["result"] and "예약없음"     in str(t["result"]))
-    pnr_err   = sum(1 for t in targets if t["result"] and "PNR오류"     in str(t["result"]))
-    manual    = sum(1 for t in targets if t["result"] and "수동확인필요" in str(t["result"]))
+    results = [str(t["result"]) for t in targets if t["result"]]
+    count_of = lambda kw: sum(kw in r for r in results)
+    confirmed = count_of("확인완료")
+    mismatch  = count_of("불일치")
+    no_rsv    = count_of("예약없음")
+    pnr_err   = count_of("PNR오류")
+    manual    = count_of("수동확인필요")
     # "오류"는 "PNR오류"의 부분문자열이라 그대로 세면 중복 집계됨 → PNR오류는 제외
-    error     = sum(1 for t in targets if t["result"] and
-                    (("오류" in str(t["result"]) and "PNR오류" not in str(t["result"]))
-                     or "타임아웃" in str(t["result"])))
-    skipped   = sum(1 for t in targets if t["result"] and "미조회" in str(t["result"]))
+    error     = sum(("오류" in r and "PNR오류" not in r) or "타임아웃" in r for r in results)
+    skipped   = count_of("미조회")
 
     print(f"\n{'='*50}")
     print(f"✅ 확인완료      : {confirmed}건")
@@ -2654,8 +2587,11 @@ async def main():
     print(f"💥 오류/재시도   : {error}건")
     if skipped:
         print(f"⬜ 미조회        : {skipped}건  ← 중단되어 조회 못함, 재실행 필요!")
+    if _shot_count:
+        print(f"\n📷 실패 화면 {_shot_count}장 저장 ({SHOT_KEEP_DAYS}일 후 자동 삭제): {SHOT_DIR}")
     input("\n엔터 누르면 종료...")
 
 
 if __name__ == "__main__":
+    _bootstrap()
     asyncio.run(main())
